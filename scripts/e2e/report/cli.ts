@@ -272,8 +272,8 @@ export async function writeReport(args: ReportArgs) {
     writeFileSync(join(outDir, BASE_ROWS_FILE), JSON.stringify({ setup_run_id: setupRunId, kind: run.kind, pr: run.pr, pr_sha: run.pr_sha, rows: baseRowsOf(results.rows) }, null, 2) + "\n")
     posted.refused = `${run.kind} runs post nothing; their rows go into the PR run's comment`
   } else {
-    const head = run.pr ? await gh.get<{ head: { sha: string } }>(`/pulls/${run.pr}`) : null
-    if (run.pr && head?.head.sha !== run.pr_sha) {
+    const head = run.pr && !run.fixture ? await gh.get<{ head: { sha: string } }>(`/pulls/${run.pr}`) : null
+    if (run.pr && !run.fixture && head?.head.sha !== run.pr_sha) {
       superseded = true
       posted.refused = `superseded: PR #${run.pr} head is ${head?.head.sha.slice(0, 12) ?? "unreadable"}, not ${run.pr_sha.slice(0, 12)}; nothing was posted`
     } else {
