@@ -11,6 +11,9 @@ import { planShards, planSummary, shardPlanDoc } from "../plan-shards.mjs"
 import { catalogueFromList } from "../report/id.mjs"
 import { readSetupPlan } from "../report/cli.js"
 import { FIXTURE_CASES, KINDS, type FixtureCase, deploymentKey, parseSetupInputs, runTaskSteps } from "./t2/skeleton.js"
+import { readConvexTarget } from "./t2/resolve-convex.js"
+import { createGitHubReader } from "./t2/resolve-github.js"
+import { readPreview } from "./t2/resolve.js"
 import type { SetupStepContext, SetupTask } from "./t2/step.js"
 import { runSetupStep as t3 } from "./t3/index.js"
 import { runSetupStep as t4 } from "./t4/index.js"
@@ -139,6 +142,53 @@ export async function dispatchRun(gh: GitHub, planDir: string, now: () => Date =
   return { runId: String(body.workflow_run_id), htmlUrl: body.html_url ?? null, ref: main.ref }
 }
 
+export interface ResolveClients {
+  pull(pr: number): Promise<{ headSha: string; headRepo: string | null; baseRepo: string } | null>
+  readyConvex(sha: string): Promise<string | null>
+  mergeBase(sha: string): Promise<string>
+}
+
+export interface LiveResolution {
+  refused: string | null
+  headSha: string
+  deployment: string
+}
+
+export async function resolveLive(a: { kind: RunKind; pr: number | null; setupRunId: string; repo: string; sha: string }, clients: () => ResolveClients): Promise<LiveResolution> {
+  if (a.pr === null) return { refused: null, headSha: a.sha, deployment: `${a.kind}-${a.setupRunId}` }
+  if (!a.repo) throw new Error("GITHUB_REPOSITORY is not set")
+  const c = clients()
+  const pull = await c.pull(a.pr)
+  if (!pull) return { refused: `PR #${a.pr} was not found`, headSha: a.sha, deployment: `pr-${a.pr}` }
+  if (pull.headRepo !== a.repo || pull.baseRepo !== a.repo) return { refused: "fork PRs are not run", headSha: a.sha, deployment: `pr-${a.pr}` }
+  if (a.kind === "base") return { refused: null, headSha: pull.headSha, deployment: `e2e/base/${(await c.mergeBase(pull.headSha)).slice(0, 12)}` }
+  if (a.kind === "pr") return { refused: null, headSha: pull.headSha, deployment: (await c.readyConvex(pull.headSha)) ?? `pr-${a.pr}` }
+  return { refused: null, headSha: pull.headSha, deployment: `pr-${a.pr}` }
+}
+
+export function resolveClients(gh: GitHub, token: string): ResolveClients {
+  return {
+    async pull(pr) {
+      const p = await gh.get<{ head: { sha: string; repo: { full_name: string } | null }; base: { repo: { full_name: string } } }>(`/pulls/${pr}`)
+      return p ? { headSha: p.head.sha, headRepo: p.head.repo?.full_name ?? null, baseRepo: p.base.repo.full_name } : null
+    },
+    async readyConvex(sha) {
+      try {
+        const preview = await readPreview(createGitHubReader({ repo: gh.repo, token }), sha)
+        if (preview.state !== "READY") return null
+        return (await readConvexTarget(preview.url, async (url) => (await fetch(url, { signal: AbortSignal.timeout(30_000) })).text())).deployment
+      } catch {
+        return null
+      }
+    },
+    async mergeBase(sha) {
+      const c = await gh.get<{ merge_base_commit: { sha: string } }>(`/compare/staging...${sha}`)
+      if (!c) throw new Error(`no merge base for ${sha}`)
+      return c.merge_base_commit.sha
+    },
+  }
+}
+
 const pick = <T extends string>(value: string | undefined, allowed: readonly T[], fallback: T): T => {
   if (!value) return fallback
   if (!(allowed as readonly string[]).includes(value)) throw new Error(`unknown value "${value}"; expected one of ${allowed.join(", ")}`)
@@ -151,7 +201,7 @@ export function parsePr(value: string | undefined) {
   return Number(value)
 }
 
-export async function main(argv: string[], source: Record<string, string | undefined> = process.env, deps: { gh?: GitHub } = {}) {
+export async function main(argv: string[], source: Record<string, string | undefined> = process.env, deps: { gh?: GitHub; resolve?: ResolveClients } = {}) {
   const [cmd, dir] = argv
   const client = () => deps.gh ?? gitHubClient({ repo: env("GITHUB_REPOSITORY", source), token: env("GH_TOKEN", source), apiUrl: source.GITHUB_API_URL })
   switch (cmd) {
@@ -159,16 +209,27 @@ export async function main(argv: string[], source: Record<string, string | undef
       const event = env("GITHUB_EVENT_NAME", source)
       const inputs = parseSetupInputs(event, { mode: source.INPUT_MODE, kind: source.INPUT_KIND, fixture_case: source.INPUT_FIXTURE_CASE })
       const payload = source.GITHUB_EVENT_PATH && existsSync(source.GITHUB_EVENT_PATH) ? readJsonFile<{ pull_request?: { number: number } }>(source.GITHUB_EVENT_PATH) : {}
+      const inputPr = parsePr(source.INPUT_PR)
       const pr = payload.pull_request?.number ?? null
-      const live = inputs.mode === "live" && source.LIVE_SETUP === "true"
+      const setupRunId = env("GITHUB_RUN_ID", source)
+      const gated = inputs.mode === "live" && source.LIVE_SETUP === "true"
+      const live = gated
+        ? await resolveLive(
+            { kind: inputs.kind, pr: pr ?? inputPr, setupRunId, repo: source.GITHUB_REPOSITORY ?? "", sha: env("GITHUB_SHA", source) },
+            () => deps.resolve ?? resolveClients(client(), env("GH_TOKEN", source)),
+          )
+        : null
+      if (live?.refused) summary(`## e2e setup\n\nNot run: ${live.refused}. Nothing keyed ran.`, source)
       output(
         {
           mode: inputs.mode,
           kind: inputs.kind,
           fixture_case: inputs.fixtureCase,
-          pr: String(parsePr(source.INPUT_PR) ?? ""),
-          deployment: deploymentKey(inputs, env("GITHUB_RUN_ID", source), pr),
-          live: String(live),
+          pr: String(inputPr ?? ""),
+          deployment: live?.deployment ?? deploymentKey(inputs, setupRunId, pr),
+          live: String(gated && !live?.refused),
+          refused: live?.refused ?? "",
+          head_sha: live?.headSha ?? env("GITHUB_SHA", source),
         },
         source,
       )

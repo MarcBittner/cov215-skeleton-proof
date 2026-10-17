@@ -1,5 +1,10 @@
 name: e2e-dist
 description: Install node_modules (cached on the lockfile) and compile scripts/e2e to scripts/e2e/dist; workflows run the compiled JavaScript.
+inputs:
+  cache:
+    description: Restore and save node_modules keyed on the checkout's package-lock.json. Only jobs that check out staging pass "true".
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -7,6 +12,7 @@ runs:
       with:
         node-version: 24
     - id: modules
+      if: inputs.cache == 'true'
       uses: actions/cache@v4
       with:
         path: node_modules

@@ -143,6 +143,10 @@ function render({ results, scope, rowFiles, meta, esc, shotUrl }, level) {
   for (const [task, title] of SECTIONS) {
     out.push("", `### ${title}`, rowsSection(rowFiles?.[task], task, esc, level, meta?.setupRunId))
   }
+  if (meta?.baseRows?.length) {
+    out.push("", "### Fails on base")
+    for (const row of meta.baseRows.slice(0, level >= 3 ? 20 : 200)) out.push(`- ${row.level === "warn" ? "⚠️ " : ""}${esc(clip(String(row.text), 400))}`)
+  }
   const marker = bindingMarker(meta?.binding)
   if (marker) out.push("", marker)
   return out.join("\n") + "\n"

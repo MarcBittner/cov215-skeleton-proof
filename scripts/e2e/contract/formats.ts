@@ -67,6 +67,7 @@ function shardErrors(shards: Shard[], at: string): string[] {
       const where = `${at}/${si}/tests/${ti}`
       const kind = testKindOf(t.id)
       if (kind === null) errors.push(`${where}: ${t.id} is not a valid test id`)
+      else if (!isIdOfKind(t.id, "test")) errors.push(`${where}: ${t.id} must be planned as test:e2e/generated/<file>::<gen id>`)
       else if (kind !== t.kind) errors.push(`${where}: kind ${t.kind} does not match id kind ${kind}`)
       if (seen.has(t.id)) errors.push(`${where}: ${t.id} is planned twice`)
       seen.add(t.id)

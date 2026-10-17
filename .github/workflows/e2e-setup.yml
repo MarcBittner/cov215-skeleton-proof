@@ -35,7 +35,7 @@ jobs:
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions: {contents: read}
+    permissions: {contents: read, deployments: read, pull-requests: read}
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
       kind: ${{ steps.resolve.outputs.kind }}
@@ -43,6 +43,8 @@ jobs:
       pr: ${{ steps.resolve.outputs.pr }}
       deployment: ${{ steps.resolve.outputs.deployment }}
       live: ${{ steps.resolve.outputs.live }}
+      refused: ${{ steps.resolve.outputs.refused }}
+      head_sha: ${{ steps.resolve.outputs.head_sha }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -50,6 +52,7 @@ jobs:
       - id: resolve
         run: node scripts/e2e/dist/scripts/e2e/setup/entry.js resolve
         env:
+          GH_TOKEN: ${{ github.token }}
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_KIND: ${{ inputs.kind }}
           INPUT_PR: ${{ inputs.pr }}
@@ -64,20 +67,18 @@ jobs:
     permissions: {contents: read}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - id: modules
-        uses: actions/cache/restore@v4
-        with:
-          path: node_modules
-          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - if: steps.modules.outputs.cache-hit != 'true'
-        run: npm ci --prefer-offline --no-audit --no-fund
-      - run: npx playwright test --list --reporter=json > e2e-list.json
+        with: {persist-credentials: false}
+      - uses: ./.github/actions/e2e-dist
+      - name: fetch the e2e tree of the listed commit as data
+        run: |
+          mkdir -p e2e-in/tree
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/tarball/$HEAD_SHA" \
+            | tar -xz -C e2e-in/tree --strip-components=1 --wildcards '*/e2e/*'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+      - run: node scripts/e2e/dist/scripts/e2e/setup/t2/static-list.js . e2e-in/tree e2e-list.json
       - uses: actions/upload-artifact@v4
         with:
           name: e2e-list
@@ -86,12 +87,12 @@ jobs:
 
   prepare:
     needs: [resolve, list]
-    if: always() && needs.resolve.result == 'success' && needs.list.result != 'failure' && needs.list.result != 'cancelled'
+    if: always() && needs.resolve.result == 'success' && needs.resolve.outputs.refused == '' && needs.list.result != 'failure' && needs.list.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ needs.resolve.outputs.live == 'true' && 'e2e-setup' || '' }}
     concurrency:
-      group: convex-${{ needs.resolve.outputs.deployment }}
+      group: e2e-deploy-${{ needs.resolve.outputs.deployment }}
       cancel-in-progress: false
     permissions: {actions: write, contents: write, deployments: read, pull-requests: write}
     env:
@@ -115,20 +116,62 @@ jobs:
           path: e2e-out/plan/
           retention-days: 90
       - if: steps.prepare.outputs.dispatch == 'true'
+        id: fixture-dispatch
         run: node scripts/e2e/dist/scripts/e2e/setup/entry.js dispatch e2e-out/plan
-      - if: steps.prepare.outputs.dispatch == 'true'
+      - if: always() && steps.fixture-dispatch.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-plan
+          name: e2e-plan-final
           path: e2e-out/plan/
           retention-days: 90
-          overwrite: true
       - if: needs.resolve.outputs.live == 'true'
         uses: actions/download-artifact@v4
         with:
           name: e2e-list
           path: e2e-in/list
       - if: needs.resolve.outputs.live == 'true'
+        id: contain
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js contain
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_KIND: ${{ needs.resolve.outputs.kind }}
+          INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
+          E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
+          E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
+          E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
+          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
+          E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
+          E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
+          E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
+          E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
+          E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_STAGE_DIR: e2e-out/stage
+          E2E_WORK_DIR: e2e-out/work
+      - if: always() && steps.contain.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-control/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-control
+          path: e2e-out/stage/e2e-control/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.contain.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-head/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-head
+          path: e2e-out/stage/e2e-head/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.contain.outcome != 'skipped' && steps.contain.outputs.contained != 'true' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-plan
+          path: e2e-out/stage/e2e-plan/
+          retention-days: 90
+      - if: steps.contain.outputs.contained == 'true'
         id: live
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js prepare
         env:
@@ -156,7 +199,6 @@ jobs:
           name: e2e-plan
           path: e2e-out/stage/e2e-plan/
           retention-days: 90
-          overwrite: true
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-control/**') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -170,7 +212,6 @@ jobs:
           name: e2e-bundle
           path: e2e-out/stage/e2e-bundle/
           retention-days: 1
-          overwrite: true
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-head/**') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -184,21 +225,18 @@ jobs:
           name: e2e-comment-rows-t3
           path: e2e-out/stage/e2e-comment-rows-t3/
           retention-days: 90
-          overwrite: true
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t4/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: e2e-comment-rows-t4
           path: e2e-out/stage/e2e-comment-rows-t4/
           retention-days: 90
-          overwrite: true
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t5/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: e2e-comment-rows-t5
           path: e2e-out/stage/e2e-comment-rows-t5/
           retention-days: 90
-          overwrite: true
       - if: steps.live.outputs.dispatch == 'true'
         id: dispatch
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js dispatch
@@ -221,13 +259,12 @@ jobs:
           E2E_LIST_FILE: e2e-in/list/e2e-list.json
           E2E_STAGE_DIR: e2e-out/stage
           E2E_WORK_DIR: e2e-out/work
-      - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
+      - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan-final/**') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-plan
-          path: e2e-out/stage/e2e-plan/
+          name: e2e-plan-final
+          path: e2e-out/stage/e2e-plan-final/
           retention-days: 90
-          overwrite: true
       - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-head/**') != ''
         uses: actions/upload-artifact@v4
         with:

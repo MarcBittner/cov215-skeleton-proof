@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
-import type { SetupKind, SetupMode, SetupStep, SetupStepContext, SetupStepResult, SetupTask } from "./step"
+import type { SetupKind, SetupMode, SetupStep, SetupStepContext, SetupStepResult, SetupTask } from "./step.js"
 
 export const KINDS: SetupKind[] = ["pr", "postmerge", "nightly", "gate", "mut", "fallback", "fresh", "base"]
 export const FIXTURE_CASES = ["pass", "fail", "drop", "no-fan-in"] as const

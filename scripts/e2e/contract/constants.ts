@@ -5,6 +5,7 @@ export const CONTRACT_VERSION = "1.0"
 
 export const ARTIFACTS = {
   plan: "e2e-plan",
+  planFinal: "e2e-plan-final",
   control: "e2e-control",
   bundle: "e2e-bundle",
   bundleAi: "e2e-bundle-ai",

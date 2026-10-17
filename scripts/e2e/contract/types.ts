@@ -20,6 +20,8 @@ export type SetupPlan = {
   pr: number | null
   pr_sha: string
   base_sha: string | null
+  target_sha?: string
+  tooling_sha?: string | null
   branch: string
   deployment: {
     github_deployment_id: number

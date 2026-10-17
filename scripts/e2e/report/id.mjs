@@ -21,12 +21,10 @@ export function parseTestId(line) {
 }
 
 export function isContractTestId(id) {
-  return typeof id === "string" && isIdOfKind(id, "test", "gen-screen", "gen-snapshot")
+  return typeof id === "string" && isIdOfKind(id, "test")
 }
 
 export function contractId({ file, titles }, testDir = TEST_DIR) {
-  const last = titles[titles.length - 1]
-  if (titles.length && isIdOfKind(last, "gen-screen", "gen-snapshot")) return last
   const id = `test:${testDir}/${file}::${titles.join(SEP)}`
   if (!isIdOfKind(id, "test")) throw new Error(`test has no contract id (empty, padded or multi-line title): ${[file, ...titles].join(SEP)}`)
   return id
@@ -34,12 +32,6 @@ export function contractId({ file, titles }, testDir = TEST_DIR) {
 
 export function projectOf(id) {
   return parseTestId(id).project
-}
-
-export function kindOf(file) {
-  if (file.startsWith("generated/screen-checks")) return "screen"
-  if (file.startsWith("generated/behaviour-snapshots")) return "snapshot"
-  return "functional"
 }
 
 export function contractIdFromLine(line, testDir = TEST_DIR) {
@@ -79,7 +71,7 @@ export function catalogueFromList(listReport, testDir = TEST_DIR) {
     if (byContract.has(cid)) throw new Error(`${byContract.get(cid)} and ${id} share contract id ${cid}; a test runs in one project`)
     seen.add(id)
     byContract.set(cid, id)
-    out.push({ id, contractId: cid, project, file, titles, kind: testKindOf(cid) ?? kindOf(file) })
+    out.push({ id, contractId: cid, project, file, titles, kind: testKindOf(cid) })
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }

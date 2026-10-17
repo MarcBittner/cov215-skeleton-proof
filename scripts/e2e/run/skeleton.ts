@@ -1,12 +1,12 @@
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 import { FILES } from "../contract/constants.js"
 import { validateSetupPlan, validateShardPlan } from "../contract/formats.js"
 import type { PlannedTest, SetupPlan, ShardPlan } from "../contract/types.js"
 import { readJsonFile } from "../lib/github.js"
-import { SEP, TEST_DIR } from "../report/id.mjs"
+import { SEP, TEST_DIR, lineFromContractId } from "../report/id.mjs"
 
 export const FIXTURE_FILE = "fixture.json"
 export const FIXTURE_SCREENSHOT = Buffer.from(
@@ -19,7 +19,9 @@ export interface FixtureJson {
   fan_in: boolean
 }
 
-export type InputsCheck = { ok: true; shards: number[]; fanIn: boolean } | { ok: false; reason: string }
+export type InputsCheck =
+  | { ok: true; shards: number[]; fanIn: boolean; live: boolean; bundleSha: string; baseUrl: string }
+  | { ok: false; reason: string }
 
 export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: string; run: unknown; plan: unknown; fixture: FixtureJson | null }): InputsCheck {
   const runResult = validateSetupPlan(args.run)
@@ -31,12 +33,21 @@ export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: 
   if (run.setup_run_id !== args.setupRunId) return { ok: false, reason: `plan belongs to setup run ${run.setup_run_id}, not ${args.setupRunId}` }
   if (plan.setup_run_id !== args.setupRunId) return { ok: false, reason: `plan.json belongs to setup run ${plan.setup_run_id}` }
   if (!run.dispatches.some((d) => d.run_key === args.runKey)) return { ok: false, reason: "run_key does not match the setup plan" }
-  if (run.pr_sha !== args.sha) return { ok: false, reason: `planned sha ${run.pr_sha} is not this run's sha ${args.sha}` }
-  if (!run.fixture) return { ok: false, reason: "live runs are not built yet" }
-  if (!args.fixture) return { ok: false, reason: "a fixture run has no fixture.json" }
+  if (args.sha !== run.pr_sha && !(run.tooling_sha && args.sha === run.tooling_sha)) {
+    return { ok: false, reason: `planned sha ${run.pr_sha}${run.tooling_sha ? ` (tooling ${run.tooling_sha})` : ""} is not this run's sha ${args.sha}` }
+  }
+  if (run.fixture && !args.fixture) return { ok: false, reason: "a fixture run has no fixture.json" }
+  if (!run.fixture && args.fixture) return { ok: false, reason: "a live run carries a fixture.json" }
+  if (!run.fixture && !run.mail.contained) return { ok: false, reason: "a live run whose mail is not contained is not run" }
   const shards = plan.shards.filter((s) => s.run_key === args.runKey).map((s) => s.index)
   if (!shards.length) return { ok: false, reason: "plan has no shards for this run_key" }
-  return { ok: true, shards, fanIn: args.fixture.fan_in }
+  return { ok: true, shards, fanIn: args.fixture ? args.fixture.fan_in : true, live: !run.fixture, bundleSha: run.pr_sha, baseUrl: run.deployment.url }
+}
+
+export function shardTestList(plan: ShardPlan, runKey: string, index: number): string[] {
+  const shard = plan.shards.find((s) => s.run_key === runKey && s.index === index)
+  if (!shard) throw new Error(`shard ${index} is not in the plan`)
+  return shard.tests.map((t) => lineFromContractId(t.id, t.project))
 }
 
 function where(test: PlannedTest) {
@@ -107,10 +118,21 @@ export async function main(argv: string[]) {
   const check = checkRunInputs({ setupRunId: env("SETUP_RUN_ID"), runKey: env("RUN_KEY"), sha: env("GITHUB_SHA"), run, plan, fixture })
   if (!check.ok) throw new Error(check.reason)
   if (cmd === "inputs") {
-    appendFileSync(env("GITHUB_OUTPUT"), `shards=${JSON.stringify(check.shards)}\nfan_in=${check.fanIn}\n`)
+    appendFileSync(
+      env("GITHUB_OUTPUT"),
+      `shards=${JSON.stringify(check.shards)}\nfan_in=${check.fanIn}\nlive=${check.live}\nbundle_sha=${check.bundleSha}\nbase_url=${check.baseUrl}\n`,
+    )
+    return
+  }
+  if (cmd === "tests") {
+    if (!check.live) throw new Error("a fixture run has no Playwright test list")
+    const lines = shardTestList(plan as ShardPlan, env("RUN_KEY"), Number(env("SHARD")))
+    mkdirSync(dirname(outDir), { recursive: true })
+    writeFileSync(outDir, lines.join("\n") + "\n")
     return
   }
   if (cmd === "shard") {
+    if (check.live) throw new Error("a live shard runs Playwright, not the fixture reporter")
     const index = Number(env("SHARD"))
     const { report, shots, ran } = fixtureShardReport(run as SetupPlan, plan as ShardPlan, fixture as FixtureJson, index, env("RUN_KEY"))
     mkdirSync(outDir, { recursive: true })

@@ -21,10 +21,14 @@ jobs:
     outputs:
       shards: ${{ steps.inputs.outputs.shards }}
       fan_in: ${{ steps.inputs.outputs.fan_in }}
+      live: ${{ steps.inputs.outputs.live }}
+      bundle_sha: ${{ steps.inputs.outputs.bundle_sha }}
+      base_url: ${{ steps.inputs.outputs.base_url }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
       - uses: ./.github/actions/e2e-dist
+        with: {cache: "false"}
       - uses: actions/download-artifact@v4
         with:
           name: e2e-plan
@@ -50,19 +54,57 @@ jobs:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
       - uses: ./.github/actions/e2e-dist
+        with: {cache: "false"}
       - uses: actions/download-artifact@v4
         with:
           name: e2e-plan
           path: e2e-in/plan
           run-id: ${{ inputs.setup_run_id }}
           github-token: ${{ github.token }}
-      - run: node scripts/e2e/dist/scripts/e2e/run/skeleton.js shard e2e-in/plan e2e-out/shard
+      - if: needs.inputs.outputs.live != 'true'
+        run: node scripts/e2e/dist/scripts/e2e/run/skeleton.js shard e2e-in/plan e2e-out/shard
         env:
           SETUP_RUN_ID: ${{ inputs.setup_run_id }}
           RUN_KEY: ${{ inputs.run_key }}
           SHARD: ${{ matrix.shard }}
-      - run: node scripts/e2e/dist/scripts/e2e/report/scrub.mjs e2e-out/shard
-      - uses: actions/upload-artifact@v4
+      - if: needs.inputs.outputs.live == 'true'
+        run: node scripts/e2e/dist/scripts/e2e/run/skeleton.js tests e2e-in/plan e2e-out/test-list.txt
+        env:
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          RUN_KEY: ${{ inputs.run_key }}
+          SHARD: ${{ matrix.shard }}
+      - if: needs.inputs.outputs.live == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-bundle
+          path: e2e-in/bundle
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: needs.inputs.outputs.live == 'true'
+        run: npx playwright install --with-deps chromium
+      - if: needs.inputs.outputs.live == 'true'
+        id: playwright
+        continue-on-error: true
+        run: npx playwright test --test-list e2e-out/test-list.txt
+        env:
+          CI: "true"
+          E2E_BASE_URL: ${{ needs.inputs.outputs.base_url }}
+          E2E_BUNDLE_DIR: e2e-in/bundle
+          E2E_BUNDLE_SHA: ${{ needs.inputs.outputs.bundle_sha }}
+          E2E_TICKET_KEY: ${{ secrets.E2E_TICKET_KEY }}
+          E2E_SHARD: ${{ matrix.shard }}
+          E2E_RUN_KEY: ${{ inputs.run_key }}
+          E2E_SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+      - if: always() && needs.inputs.outputs.live == 'true'
+        run: |
+          mkdir -p e2e-out/shard
+          if [ -f playwright-report/results.json ]; then cp playwright-report/results.json e2e-out/shard/report.json; fi
+          if [ -d test-results ]; then cp -r test-results e2e-out/shard/test-results; fi
+      - if: always()
+        id: scrub
+        run: node scripts/e2e/dist/scripts/e2e/report/scrub.mjs e2e-out/shard
+      - if: always() && steps.scrub.outcome == 'success'
+        uses: actions/upload-artifact@v4
         with:
           name: e2e-shard-${{ matrix.shard }}
           path: e2e-out/shard/

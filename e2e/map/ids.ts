@@ -185,10 +185,19 @@ export function isIdOfKind(s: string, ...kinds: MapIdKind[]): boolean {
   return parsed !== null && kinds.includes(parsed.kind) && formatId(parsed) === s
 }
 
+export const GENERATED_DIR = "e2e/generated/"
+
 export function testKindOf(s: string): TestKind | null {
   const parsed = parseId(s)
   if (!parsed || formatId(parsed) !== s) return null
-  if (parsed.kind === "test") return "functional"
+  if (parsed.kind === "test") {
+    const [title] = parsed.titlePath
+    if (parsed.path.startsWith(GENERATED_DIR) && parsed.titlePath.length === 1) {
+      if (isIdOfKind(title, "gen-screen")) return "screen"
+      if (isIdOfKind(title, "gen-snapshot")) return "snapshot"
+    }
+    return "functional"
+  }
   if (parsed.kind === "gen-screen") return "screen"
   if (parsed.kind === "gen-snapshot") return "snapshot"
   return null

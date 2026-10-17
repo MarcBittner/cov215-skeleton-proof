@@ -12,9 +12,23 @@ export function recordedDispatches(runRecord) {
     .map((d) => ({ run_key: String(d.run_key), role: d.role, run_id: String(d.dispatched_run_id) }))
 }
 
-export function checkSetupRun({ setupRun, runRecord }) {
+export function runShas(runRecord) {
+  return [runRecord?.pr_sha, runRecord?.tooling_sha].filter((sha) => typeof sha === "string" && sha.length > 0)
+}
+
+export const TRUSTED_BRANCH_EVENTS = ["schedule", "workflow_dispatch"]
+
+export function untrustedSetupRun(setupRun) {
   if (!setupRun || workflowPath(setupRun) !== SETUP_WORKFLOW) return `setup run is not ${SETUP_WORKFLOW}`
+  if (setupRun.event === "pull_request_target") return null
+  if (!TRUSTED_BRANCH_EVENTS.includes(setupRun.event)) return `setup run event ${setupRun.event} is not trusted`
   if (setupRun.head_branch !== TRUSTED_BRANCH) return `setup run is from ${setupRun.head_branch}, not ${TRUSTED_BRANCH}`
+  return null
+}
+
+export function checkSetupRun({ setupRun, runRecord }) {
+  const untrusted = untrustedSetupRun(setupRun)
+  if (untrusted) return untrusted
   if (!runRecord || String(runRecord.setup_run_id) !== String(setupRun.id)) return "run.json does not belong to this setup run"
   return null
 }
@@ -28,7 +42,7 @@ export function checkRunTrust({ setupRun, runRecord, run, jobs = [] }) {
   const dispatch = recordedDispatches(runRecord).find((d) => d.run_id === String(run.id))
   if (!dispatch) return refuse(`e2e-run ${run.id} is not recorded in setup's run.json`)
   if (workflowPath(run) !== RUN_WORKFLOW) return refuse(`run ${run.id} is not ${RUN_WORKFLOW}`)
-  if (!runRecord.pr_sha || run.head_sha !== runRecord.pr_sha) return refuse(`run head ${run.head_sha} differs from setup's pr_sha ${runRecord.pr_sha}`)
+  if (!runShas(runRecord).includes(run.head_sha)) return refuse(`run head ${run.head_sha} differs from setup's pr_sha ${runRecord.pr_sha}${runRecord.tooling_sha ? ` and tooling_sha ${runRecord.tooling_sha}` : ""}`)
   if (run.status !== "completed") return { decision: "wait", reason: `run ${run.id} is ${run.status}` }
   const open = jobs.filter((j) => j.status !== "completed")
   if (open.length) return { decision: "wait", reason: `${open.length} job(s) still in progress` }

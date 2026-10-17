@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 20
     environment: ${{ matrix.target.mode == 'live' && 'e2e-setup' || '' }}
     concurrency:
-      group: e2e-report-${{ matrix.target.setup_run_id }}
+      group: e2e-deploy-${{ matrix.target.deployment }}
       cancel-in-progress: false
     permissions: {actions: read, checks: write, contents: write, pull-requests: write}
     strategy:
@@ -53,7 +53,7 @@ jobs:
       - uses: ./.github/actions/e2e-dist
       - uses: actions/download-artifact@v4
         with:
-          name: e2e-plan
+          name: ${{ matrix.target.plan_artifact }}
           path: e2e-in/plan
           run-id: ${{ matrix.target.setup_run_id }}
           github-token: ${{ github.token }}
@@ -82,11 +82,22 @@ jobs:
         run: node scripts/e2e/dist/scripts/e2e/report/cli.js report e2e-in/plan e2e-in/shards e2e-in/rows e2e-out/outcome
         env:
           RUN_ID: ${{ steps.trust.outputs.run_id }}
+      - if: always() && steps.trust.outputs.ok == 'true' && matrix.target.mode == 'live'
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/report-restore.js e2e-out/outcome
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
+          E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
+          E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
+          E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
+          E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
       - if: steps.trust.outputs.ok != 'true' && steps.trust.outputs.record == 'true'
         run: node scripts/e2e/dist/scripts/e2e/report/cli.js reject e2e-out/outcome
         env:
           REASON: ${{ steps.trust.outputs.reason }}
-      - if: steps.trust.outputs.record == 'true'
+      - if: always() && steps.trust.outputs.record == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-outcome-${{ matrix.target.setup_run_id }}

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -14,10 +15,12 @@ import { type ReportHooks, type ReportTrigger, reportHooks } from "./hooks.js"
 import { findShardReports, readRowFiles, recount } from "./recount.mjs"
 import { scrubDirectory } from "./scrub.mjs"
 import { SHOTS_BRANCH } from "./shots.mjs"
-import { TRUSTED_BRANCH, checkPlanBinding, checkRunTrust, checkSetupRun } from "./trust.mjs"
+import { TRUSTED_BRANCH, checkPlanBinding, checkRunTrust, checkSetupRun, untrustedSetupRun } from "./trust.mjs"
 
 export const REPORT_BOT = "github-actions[bot]"
-export const CHECK_NAME = "e2e"
+export const CHECK_NAME = "e2e / staging report"
+export const BASE_ROWS_FILE = "base-rows.json"
+export const NO_PR_POST_KINDS = new Set(["base", "postmerge"])
 export const OUTCOME_ARTIFACT = (setupRunId: string) => `e2e-outcome-${setupRunId}`
 export const SUMMARY_FILE = "plan-summary.json"
 export const MAX_SHOTS = 40
@@ -26,6 +29,7 @@ export const MAX_SHOT_BYTES = 2_000_000
 interface ApiRun {
   id: number
   path: string
+  event?: string
   head_branch: string | null
   head_sha: string
   status: string | null
@@ -35,6 +39,8 @@ interface ApiRun {
 export interface Target {
   setup_run_id: string
   mode: "fixture" | "live"
+  plan_artifact: string
+  deployment: string
 }
 
 export function readSetupPlan(dir: string): SetupPlan {
@@ -62,21 +68,26 @@ export async function listTargets(gh: GitHub, requested: string | undefined, now
     ids.push(requested)
   } else {
     const since = new Date(now - 24 * 3600 * 1000).toISOString()
-    const body = await gh.get<{ workflow_runs: { id: number }[] }>(
-      `/actions/workflows/e2e-setup.yml/runs?branch=${TRUSTED_BRANCH}&status=completed&created=>=${since}&per_page=100`,
-    )
+    const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?status=completed&created=>=${since}&per_page=100`)
     for (const r of body?.workflow_runs ?? []) {
       checked += 1
+      if (untrustedSetupRun(r)) continue
       const names = (await runArtifacts(gh, String(r.id))).map((a) => a.name)
       if (names.includes(ARTIFACTS.plan) && !(await isReported(gh, String(r.id)))) ids.push(String(r.id))
     }
   }
   const targets: Target[] = []
   for (const id of ids) {
-    const doc = await runArtifactJson<unknown>(gh, id, ARTIFACTS.plan, FILES.setupPlan).catch(() => null)
+    const final = await runArtifactJson<unknown>(gh, id, ARTIFACTS.planFinal, FILES.setupPlan).catch(() => null)
+    const doc = final ?? (await runArtifactJson<unknown>(gh, id, ARTIFACTS.plan, FILES.setupPlan).catch(() => null))
     const run = doc ? validateSetupPlan(doc) : null
     if (!requested && !(run?.ok && run.value.state === "dispatched")) continue
-    targets.push({ setup_run_id: id, mode: run?.ok && !run.value.fixture ? "live" : "fixture" })
+    targets.push({
+      setup_run_id: id,
+      mode: run?.ok && !run.value.fixture ? "live" : "fixture",
+      plan_artifact: final ? ARTIFACTS.planFinal : ARTIFACTS.plan,
+      deployment: run?.ok ? run.value.deployment.convex_deployment : `setup-${id}`,
+    })
   }
   return { targets, checked }
 }
@@ -125,14 +136,30 @@ export async function trustRun(args: {
   }
 }
 
+export function gitBlobSha(data: Buffer) {
+  return createHash("sha1").update(`blob ${data.length}\0`).update(data).digest("hex")
+}
+
 export async function pushShots(gh: GitHub, shots: { from: string; to: string }[], message: string) {
   const files = shots.filter((s) => existsSync(s.from)).slice(0, MAX_SHOTS)
+  const head = await gh.get<{ object: { sha: string } }>(`/git/ref/heads/${SHOTS_BRANCH}`)
+  const existing = new Map<string, string>()
+  if (head) {
+    const tree = await gh.get<{ tree: { path: string; type: string; sha: string }[] }>(`/git/trees/${head.object.sha}?recursive=1`)
+    for (const e of tree?.tree ?? []) if (e.type === "blob") existing.set(e.path, e.sha)
+  }
+  const known = new Set(existing.values())
   const entries: { path: string; mode: "100644"; type: "blob"; sha: string }[] = []
   for (const f of files) {
     const data = readFileSync(f.from)
     if (data.length > MAX_SHOT_BYTES) continue
-    const { body } = await gh.send<{ sha: string }>("POST", "/git/blobs", { content: data.toString("base64"), encoding: "base64" })
-    entries.push({ path: f.to, mode: "100644", type: "blob", sha: body.sha })
+    const sha = gitBlobSha(data)
+    if (existing.get(f.to) === sha) continue
+    if (!known.has(sha)) {
+      const { body } = await gh.send<{ sha: string }>("POST", "/git/blobs", { content: data.toString("base64"), encoding: "base64" })
+      known.add(body.sha)
+    }
+    entries.push({ path: f.to, mode: "100644", type: "blob", sha })
   }
   if (!entries.length) return 0
   for (let attempt = 0; ; attempt += 1) {
@@ -216,7 +243,16 @@ export async function writeReport(args: ReportArgs) {
   const problems = scrub.leaks.map((l: string) => `artifact scrub left a secret in ${l}`)
   const rowFiles = readRowFiles(rowsDir) as Record<string, unknown>
   const binding = run.pr && run.kind === "pr" ? await hooks.rebind({ gh, pr: run.pr, headSha: run.pr_sha, setupRunId, trigger, rowFiles }) : null
-  const meta = { setupRunId, runTag: run.run_tag, workflowSha: run.workflow_sha, prSha: run.pr_sha, repo: gh.repo, binding: binding ? { headSha: run.pr_sha, diffHash: binding.diffHash } : null }
+  const baseRows = run.pr && run.kind === "pr" ? await baseRowsFor(gh, run.pr, run.pr_sha) : []
+  const meta = {
+    setupRunId,
+    runTag: run.run_tag,
+    workflowSha: run.workflow_sha,
+    prSha: run.pr_sha,
+    repo: gh.repo,
+    binding: binding ? { headSha: run.pr_sha, diffHash: binding.diffHash } : null,
+    baseRows,
+  }
   const { results, comment, shots } = recount({
     plan,
     summary: planSummary,
@@ -230,12 +266,22 @@ export async function writeReport(args: ReportArgs) {
   writeFileSync(join(outDir, "results.json"), JSON.stringify(results, null, 2) + "\n")
   writeFileSync(join(outDir, "comment.md"), comment)
   const posted = { shots: 0, comment: null as null | { action: string; id: number }, check: false, refused: null as string | null }
+  let superseded = false
   if (scrub.leaks.length) posted.refused = "a secret survived scrubbing; nothing was posted"
-  else {
-    posted.shots = await pushShots(gh, shots, `e2e screenshots for setup run ${setupRunId}`)
-    if (run.pr) posted.comment = await upsertComment(gh, run.pr, comment)
-    await createCheck(gh, run.pr_sha, results.verdict, comment)
-    posted.check = true
+  else if (NO_PR_POST_KINDS.has(run.kind)) {
+    writeFileSync(join(outDir, BASE_ROWS_FILE), JSON.stringify({ setup_run_id: setupRunId, kind: run.kind, pr: run.pr, pr_sha: run.pr_sha, rows: baseRowsOf(results.rows) }, null, 2) + "\n")
+    posted.refused = `${run.kind} runs post nothing; their rows go into the PR run's comment`
+  } else {
+    const head = run.pr ? await gh.get<{ head: { sha: string } }>(`/pulls/${run.pr}`) : null
+    if (run.pr && head?.head.sha !== run.pr_sha) {
+      superseded = true
+      posted.refused = `superseded: PR #${run.pr} head is ${head?.head.sha.slice(0, 12) ?? "unreadable"}, not ${run.pr_sha.slice(0, 12)}; nothing was posted`
+    } else {
+      posted.shots = await pushShots(gh, shots, `e2e screenshots for setup run ${setupRunId}`)
+      if (run.pr) posted.comment = await upsertComment(gh, run.pr, comment)
+      await createCheck(gh, run.pr_sha, results.verdict, comment)
+      posted.check = true
+    }
   }
   const outcome = {
     setup_run_id: setupRunId,
@@ -245,11 +291,47 @@ export async function writeReport(args: ReportArgs) {
     counts: results.counts,
     problems: results.problems.length,
     posted,
+    superseded,
     finished: true,
     restored: run.fixture || !run.mail.contained ? "not-contained" : null,
   }
   writeFileSync(join(outDir, "outcome.json"), JSON.stringify(outcome, null, 2) + "\n")
   return { outcome, comment }
+}
+
+export interface BaseRow {
+  text: string
+  level: "info" | "warn" | "fail"
+  ids: string[]
+}
+
+export function baseRowsOf(rows: { id: string; titles?: string[]; status: string }[]): BaseRow[] {
+  return rows.map((r) => {
+    const name = r.titles?.length ? r.titles.join(" › ") : r.id
+    if (r.status === "failed") return { text: `${name}: fails on base, so it proves the fix`, level: "info", ids: [r.id] }
+    if (r.status === "passed") return { text: `${name}: passes on base, so it proves nothing`, level: "warn", ids: [r.id] }
+    return { text: `${name}: ${r.status} on base, so it proves nothing`, level: "warn", ids: [r.id] }
+  })
+}
+
+export async function baseRowsFor(gh: GitHub, pr: number, prSha: string, now = Date.now()): Promise<BaseRow[]> {
+  const since = new Date(now - 24 * 3600 * 1000).toISOString()
+  const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?created=>=${since}&per_page=100`)
+  const out: BaseRow[] = []
+  for (const r of body?.workflow_runs ?? []) {
+    if (untrustedSetupRun(r)) continue
+    const id = String(r.id)
+    const doc =
+      (await runArtifactJson<unknown>(gh, id, ARTIFACTS.planFinal, FILES.setupPlan).catch(() => null)) ??
+      (await runArtifactJson<unknown>(gh, id, ARTIFACTS.plan, FILES.setupPlan).catch(() => null))
+    const plan = doc ? validateSetupPlan(doc) : null
+    if (!plan?.ok || plan.value.kind !== "base" || plan.value.pr !== pr || plan.value.pr_sha !== prSha) continue
+    const [artifact] = (await gh.get<{ artifacts: { id: number; name: string; expired: boolean }[] }>(`/actions/artifacts?name=${OUTCOME_ARTIFACT(id)}&per_page=1`))?.artifacts ?? []
+    const text = artifact && !artifact.expired ? await artifactFile(gh, artifact, BASE_ROWS_FILE).catch(() => null) : null
+    if (text) out.push(...(JSON.parse(text) as { rows: BaseRow[] }).rows)
+    else out.push({ text: `fail-on-base run ${id} has not reported yet; its rows appear on the next report of this head`, level: "info", ids: [] })
+  }
+  return out
 }
 
 export async function flakeProposals(gh: GitHub, quarantineIds: Set<string>, now = Date.now(), maxRuns = 60) {
@@ -276,7 +358,7 @@ export async function main(argv: string[], source: Record<string, string | undef
     case "targets": {
       const requested = source.SETUP_RUN_ID?.trim() || undefined
       const { targets, checked } = await listTargets(gh, requested)
-      if (!requested) summary(`## e2e report sweep\n\nChecked ${checked} setup runs on \`${TRUSTED_BRANCH}\` from the last 24 h; ${targets.length} to report: ${targets.map((t) => t.setup_run_id).join(", ") || "none"}.`, source)
+      if (!requested) summary(`## e2e report sweep\n\nChecked ${checked} setup runs (trusted: pull_request_target, or schedule and dispatch on \`${TRUSTED_BRANCH}\`) from the last 24 h; ${targets.length} to report: ${targets.map((t) => t.setup_run_id).join(", ") || "none"}.`, source)
       output({ targets: JSON.stringify(targets), any: targets.length ? "true" : "false" }, source)
       return
     }

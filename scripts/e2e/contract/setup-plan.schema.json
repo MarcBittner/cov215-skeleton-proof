@@ -39,6 +39,8 @@
     "pr": { "type": ["integer", "null"], "minimum": 1 },
     "pr_sha": { "$ref": "#/$defs/sha" },
     "base_sha": { "anyOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "target_sha": { "$ref": "#/$defs/sha" },
+    "tooling_sha": { "anyOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
     "branch": { "$ref": "#/$defs/branch" },
     "deployment": {
       "type": "object",
