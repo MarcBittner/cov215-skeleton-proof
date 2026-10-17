@@ -251,7 +251,7 @@ const output = (pairs: Record<string, string>) => {
 const summary = (md: string) => {
   const file = process.env.GITHUB_STEP_SUMMARY
   if (file) appendFileSync(file, md + "\n")
-  else process.stdout.write(md + "\n")
+  process.stdout.write(md + "\n")
 }
 
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8")) as T
