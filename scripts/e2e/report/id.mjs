@@ -5,14 +5,14 @@ export const SEP = " › "
 export const TEST_DIR = "e2e"
 export const DEFAULT_TEST_MS = 30_000
 
-export function listLine({ project, file, titles }) {
+export function testId({ project, file, titles }) {
   for (const part of [file, ...titles]) {
     if (part.includes("›")) throw new Error(`test title contains "›", which a Playwright test list cannot express: ${[file, ...titles].join(SEP)}`)
   }
   return `[${project}]${SEP}${file}${SEP}${titles.join(SEP)}`
 }
 
-export function parseListLine(line) {
+export function parseTestId(line) {
   const m = /^\[([^\]]+)\] › (.+)$/.exec(line)
   if (!m) throw new Error(`not a test-list line: ${line}`)
   const [file, ...titles] = m[2].split(SEP)
@@ -32,8 +32,18 @@ export function contractId({ file, titles }, testDir = TEST_DIR) {
   return id
 }
 
+export function projectOf(id) {
+  return parseTestId(id).project
+}
+
+export function kindOf(file) {
+  if (file.startsWith("generated/screen-checks")) return "screen"
+  if (file.startsWith("generated/behaviour-snapshots")) return "snapshot"
+  return "functional"
+}
+
 export function contractIdFromLine(line, testDir = TEST_DIR) {
-  return contractId(parseListLine(line), testDir)
+  return contractId(parseTestId(line), testDir)
 }
 
 export function lineFromContractId(id, project, testDir = TEST_DIR) {
@@ -42,7 +52,7 @@ export function lineFromContractId(id, project, testDir = TEST_DIR) {
   const repoPath = id.slice("test:".length, sep)
   const prefix = `${testDir}/`
   if (!repoPath.startsWith(prefix)) throw new Error(`${id} is not under ${testDir}/`)
-  return listLine({ project, file: repoPath.slice(prefix.length), titles: id.slice(sep + 2).split(SEP) })
+  return testId({ project, file: repoPath.slice(prefix.length), titles: id.slice(sep + 2).split(SEP) })
 }
 
 export function* walkReport(report, testDir = TEST_DIR) {
@@ -51,7 +61,7 @@ export function* walkReport(report, testDir = TEST_DIR) {
       for (const test of spec.tests ?? []) {
         const t = [...titles, spec.title]
         const where = { project: test.projectName, file: spec.file, titles: t }
-        yield { id: contractId(where, testDir), listLine: listLine(where), project: test.projectName, file: `${testDir}/${spec.file}`, titles: t, line: spec.line, test }
+        yield { id: testId(where), contractId: contractId(where, testDir), project: test.projectName, file: spec.file, titles: t, line: spec.line, test }
       }
     }
     for (const child of suite.suites ?? []) yield* walk(child, [...titles, child.title])
@@ -61,22 +71,25 @@ export function* walkReport(report, testDir = TEST_DIR) {
 }
 
 export function catalogueFromList(listReport, testDir = TEST_DIR) {
-  const seen = new Map()
+  const seen = new Set()
+  const byContract = new Map()
   const out = []
-  for (const { id, listLine: line, project, file, titles } of walkReport(listReport, testDir)) {
-    if (seen.has(id)) throw new Error(`test id ${id} is listed twice (${seen.get(id)} and ${line}); a test runs in one project`)
-    seen.set(id, line)
-    out.push({ id, listLine: line, project, file, titles, kind: testKindOf(id) })
+  for (const { id, contractId: cid, project, file, titles } of walkReport(listReport, testDir)) {
+    if (seen.has(id)) throw new Error(`duplicate test id in --list: ${id}`)
+    if (byContract.has(cid)) throw new Error(`${byContract.get(cid)} and ${id} share contract id ${cid}; a test runs in one project`)
+    seen.add(id)
+    byContract.set(cid, id)
+    out.push({ id, contractId: cid, project, file, titles, kind: testKindOf(cid) ?? kindOf(file) })
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
-export function weigher(durations, ids, projectOf) {
+export function weigher(durations, ids, projectFor = projectOfOrNull) {
   const byProject = new Map()
   const all = []
   for (const [id, ms] of Object.entries(durations ?? {})) {
     if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) continue
-    const project = projectOf(id)
+    const project = projectFor(id)
     if (project) {
       if (!byProject.has(project)) byProject.set(project, [])
       byProject.get(project).push(ms)
@@ -93,10 +106,18 @@ export function weigher(durations, ids, projectOf) {
       continue
     }
     unknown.push(id)
-    const samples = byProject.get(projectOf(id))
+    const samples = byProject.get(projectFor(id))
     weights.set(id, samples && samples.length ? percentile(samples, 0.75) : globalP75)
   }
   return { weights, unknown }
+}
+
+function projectOfOrNull(id) {
+  try {
+    return projectOf(id)
+  } catch {
+    return null
+  }
 }
 
 export function packTestIds(ids, weights, count) {

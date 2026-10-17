@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { existsSync, mkdirSync, writeFileSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 import { CONTRACT_VERSION, FILES, newRunKey, runTagFor } from "../contract/constants.js"
@@ -40,27 +40,6 @@ export interface FixtureJson {
   fan_in: boolean
 }
 
-export interface LiveSetupContext {
-  kind: RunKind
-  setupRunId: string
-  workDir: string
-  bundleDir: string
-  controlDir: string
-  sha: string
-  branch: string
-  event: string
-  eventPath: string | null
-  gh: GitHub
-}
-
-export type LiveSetup = (ctx: LiveSetupContext) => Promise<{ dispatch: boolean }>
-
-export const loadLiveSetup = async (): Promise<LiveSetup> => {
-  const mod = (await import(new URL("./t2/live.js", import.meta.url).href)) as { runLiveSetup?: LiveSetup }
-  if (typeof mod.runLiveSetup !== "function") throw new Error("scripts/e2e/setup/t2/live has no runLiveSetup export")
-  return mod.runLiveSetup
-}
-
 const STEPS = { t3, t4, t5 }
 
 export function fixtureCatalogue() {
@@ -89,7 +68,7 @@ export function fixtureRunJson(args: {
   createdAt: string
 }): SetupPlan {
   const { setupRunId, runKey, kind, pr, sha, branch, createdAt } = args
-  if (kind === "pr" && pr === null) throw new Error("a fixture run of kind pr needs fixture_pr (a pull request number in this repository)")
+  if (kind === "pr" && pr === null) throw new Error("a fixture run of kind pr needs the pr input (a pull request number in this repository)")
   return {
     schema_version: CONTRACT_VERSION,
     setup_run_id: setupRunId,
@@ -131,12 +110,11 @@ export async function prepareFixture(args: { outDir: string; setupRunId: string;
   const planned = validateShardPlan(shardPlanDoc(plan, catalogue, { setupRunId, runKey }))
   if (!planned.ok) throw new Error(`plan.json is invalid: ${planned.errors.join("; ")}`)
   const doc = planned.value
-  const lineOf = new Map(catalogue.map((t: { id: string; listLine: string }) => [t.id, t.listLine]))
   mkdirSync(outDir, { recursive: true })
   writeFileSync(join(outDir, FILES.setupPlan), JSON.stringify(run, null, 2) + "\n")
   writeFileSync(join(outDir, FILES.shardPlan), JSON.stringify(doc, null, 2) + "\n")
-  writeFileSync(join(outDir, "plan-summary.json"), JSON.stringify(planSummary(plan), null, 2) + "\n")
-  for (const s of plan.shards) writeFileSync(join(outDir, `shard-${s.shard}.txt`), s.ids.map((id: string) => lineOf.get(id)).join("\n") + "\n")
+  writeFileSync(join(outDir, "plan-summary.json"), JSON.stringify(planSummary(plan, catalogue), null, 2) + "\n")
+  for (const s of plan.shards) writeFileSync(join(outDir, `shard-${s.shard}.txt`), s.ids.join("\n") + "\n")
   const fixture: FixtureJson = { case: fixtureCase, fan_in: fixtureCase !== "no-fan-in" }
   writeFileSync(join(outDir, FIXTURE_FILE), JSON.stringify(fixture, null, 2) + "\n")
   return { run, doc, steps }
@@ -169,11 +147,11 @@ const pick = <T extends string>(value: string | undefined, allowed: readonly T[]
 
 export function parsePr(value: string | undefined) {
   if (!value) return null
-  if (!/^[1-9][0-9]{0,9}$/.test(value)) throw new Error(`fixture_pr "${value}" is not a pull request number`)
+  if (!/^[1-9][0-9]{0,9}$/.test(value)) throw new Error(`pr "${value}" is not a pull request number`)
   return Number(value)
 }
 
-export async function main(argv: string[], source: Record<string, string | undefined> = process.env, deps: { gh?: GitHub; liveSetup?: () => Promise<LiveSetup> } = {}) {
+export async function main(argv: string[], source: Record<string, string | undefined> = process.env, deps: { gh?: GitHub } = {}) {
   const [cmd, dir] = argv
   const client = () => deps.gh ?? gitHubClient({ repo: env("GITHUB_REPOSITORY", source), token: env("GH_TOKEN", source), apiUrl: source.GITHUB_API_URL })
   switch (cmd) {
@@ -188,7 +166,7 @@ export async function main(argv: string[], source: Record<string, string | undef
           mode: inputs.mode,
           kind: inputs.kind,
           fixture_case: inputs.fixtureCase,
-          fixture_pr: inputs.mode === "fixture" ? String(parsePr(source.INPUT_FIXTURE_PR) ?? "") : "",
+          pr: String(parsePr(source.INPUT_PR) ?? ""),
           deployment: deploymentKey(inputs, env("GITHUB_RUN_ID", source), pr),
           live: String(live),
         },
@@ -201,25 +179,9 @@ export async function main(argv: string[], source: Record<string, string | undef
       const mode = pick(source.MODE, ["fixture", "live"] as const, "fixture")
       const kind = pick(source.KIND, KINDS, "pr")
       if (mode === "live") {
-        if (source.LIVE !== "true") {
-          summary(`## e2e setup (${kind})\n\nLive setup is off: repository variable \`${LIVE_SETUP_VARIABLE}\` is not \`true\`. Nothing was dispatched.`, source)
-          output({ dispatch: "false" }, source)
-          return
-        }
-        const runLiveSetup = await (deps.liveSetup ?? loadLiveSetup)()
-        const result = await runLiveSetup({
-          kind,
-          setupRunId,
-          workDir: dir,
-          bundleDir: join(dirname(dir), "bundle"),
-          controlDir: join(dirname(dir), "control"),
-          sha: env("GITHUB_SHA", source),
-          branch: env("GITHUB_REF_NAME", source),
-          event: env("GITHUB_EVENT_NAME", source),
-          eventPath: source.GITHUB_EVENT_PATH ?? null,
-          gh: client(),
-        })
-        output({ dispatch: String(result.dispatch) }, source)
+        if (source.LIVE === "true") throw new Error("live setup runs through scripts/e2e/setup/t2/live-env, not this entry")
+        summary(`## e2e setup (${kind})\n\nLive setup is off: repository variable \`${LIVE_SETUP_VARIABLE}\` is not \`true\`. Nothing was dispatched.`, source)
+        output({ dispatch: "false" }, source)
         return
       }
       const fixtureCase = pick(source.FIXTURE_CASE, FIXTURE_CASES, "pass")
@@ -228,7 +190,7 @@ export async function main(argv: string[], source: Record<string, string | undef
         setupRunId,
         kind,
         fixtureCase,
-        pr: parsePr(source.FIXTURE_PR),
+        pr: parsePr(source.PR),
         sha: env("GITHUB_SHA", source),
         branch: env("GITHUB_REF_NAME", source),
       })

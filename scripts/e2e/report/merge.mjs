@@ -93,16 +93,17 @@ export function mergeResults({ plan, reports, quarantineIds = new Set() }) {
       continue
     }
     for (const entry of entries) {
-      const want = planned.get(entry.id)
+      const id = entry.contractId
+      const want = planned.get(id)
       if (!want || want.project !== entry.project) {
-        unplanned.push(entry.listLine)
+        unplanned.push(entry.id)
         continue
       }
       if (shard != null && want.shard !== shard) {
-        problems.push(`result for ${entry.id} came from shard ${shard}, planned in shard ${want.shard}`)
+        problems.push(`result for ${id} came from shard ${shard}, planned in shard ${want.shard}`)
       }
-      if (!seen.has(entry.id)) seen.set(entry.id, [])
-      seen.get(entry.id).push({ ...entry, shard })
+      if (!seen.has(id)) seen.set(id, [])
+      seen.get(id).push({ ...entry, shard })
     }
   }
   const rows = []

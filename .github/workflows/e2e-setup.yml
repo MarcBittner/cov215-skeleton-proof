@@ -6,6 +6,7 @@ on:
     branches: [staging]
   schedule:
     - cron: "0 5 * * *"
+    - cron: "15,45 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -16,22 +17,22 @@ on:
         type: choice
         options: [pr, postmerge, nightly, gate, mut, fallback, fresh, base]
         default: base
+      pr:
+        type: string
+        required: false
+        description: Pull request number. Live mode runs it; fixture mode comments on it.
       fixture_case:
         type: choice
         options: [pass, fail, drop, no-fan-in]
         default: pass
-      fixture_pr:
-        type: string
-        required: false
-        description: Fixture mode only; a pull request in this repository that the report comments on.
 
 permissions: {}
 
 jobs:
   resolve:
     if: >-
-      github.event_name != 'pull_request_target' ||
-      (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name != 'pull_request_target' && github.event.schedule != '15,45 * * * *') ||
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {contents: read}
@@ -39,7 +40,7 @@ jobs:
       mode: ${{ steps.resolve.outputs.mode }}
       kind: ${{ steps.resolve.outputs.kind }}
       fixture_case: ${{ steps.resolve.outputs.fixture_case }}
-      fixture_pr: ${{ steps.resolve.outputs.fixture_pr }}
+      pr: ${{ steps.resolve.outputs.pr }}
       deployment: ${{ steps.resolve.outputs.deployment }}
       live: ${{ steps.resolve.outputs.live }}
     steps:
@@ -51,12 +52,41 @@ jobs:
         env:
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_KIND: ${{ inputs.kind }}
+          INPUT_PR: ${{ inputs.pr }}
           INPUT_FIXTURE_CASE: ${{ inputs.fixture_case }}
-          INPUT_FIXTURE_PR: ${{ inputs.fixture_pr }}
           LIVE_SETUP: ${{ vars.E2E_LIVE_SETUP }}
 
-  prepare:
+  list:
     needs: resolve
+    if: needs.resolve.outputs.live == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions: {contents: read}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - id: modules
+        uses: actions/cache/restore@v4
+        with:
+          path: node_modules
+          key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci --prefer-offline --no-audit --no-fund
+      - run: npx playwright test --list --reporter=json > e2e-list.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-list
+          path: e2e-list.json
+          retention-days: 1
+
+  prepare:
+    needs: [resolve, list]
+    if: always() && needs.resolve.result == 'success' && needs.list.result != 'failure' && needs.list.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ needs.resolve.outputs.live == 'true' && 'e2e-setup' || '' }}
@@ -64,41 +94,28 @@ jobs:
       group: convex-${{ needs.resolve.outputs.deployment }}
       cancel-in-progress: false
     permissions: {actions: write, contents: write, deployments: read, pull-requests: write}
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
       - uses: ./.github/actions/e2e-dist
-      - id: prepare
+      - if: needs.resolve.outputs.live != 'true'
+        id: prepare
         run: node scripts/e2e/dist/scripts/e2e/setup/entry.js prepare e2e-out/plan
         env:
-          GH_TOKEN: ${{ github.token }}
           MODE: ${{ needs.resolve.outputs.mode }}
           KIND: ${{ needs.resolve.outputs.kind }}
           FIXTURE_CASE: ${{ needs.resolve.outputs.fixture_case }}
-          FIXTURE_PR: ${{ needs.resolve.outputs.fixture_pr }}
-          LIVE: ${{ needs.resolve.outputs.live }}
+          PR: ${{ needs.resolve.outputs.pr }}
       - if: steps.prepare.outputs.dispatch == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-plan
           path: e2e-out/plan/
           retention-days: 90
-      - if: steps.prepare.outputs.dispatch == 'true' && hashFiles('e2e-out/bundle/**') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-bundle
-          path: e2e-out/bundle/
-          retention-days: 1
-      - if: steps.prepare.outputs.dispatch == 'true' && hashFiles('e2e-out/control/**') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-control
-          path: e2e-out/control/
-          retention-days: 90
       - if: steps.prepare.outputs.dispatch == 'true'
         run: node scripts/e2e/dist/scripts/e2e/setup/entry.js dispatch e2e-out/plan
-        env:
-          GH_TOKEN: ${{ github.token }}
       - if: steps.prepare.outputs.dispatch == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -106,3 +123,184 @@ jobs:
           path: e2e-out/plan/
           retention-days: 90
           overwrite: true
+      - if: needs.resolve.outputs.live == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-list
+          path: e2e-in/list
+      - if: needs.resolve.outputs.live == 'true'
+        id: live
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js prepare
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_KIND: ${{ needs.resolve.outputs.kind }}
+          INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
+          E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
+          E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
+          E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
+          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
+          E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
+          E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
+          E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
+          E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
+          E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_STAGE_DIR: e2e-out/stage
+          E2E_WORK_DIR: e2e-out/work
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-plan
+          path: e2e-out/stage/e2e-plan/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-control/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-control
+          path: e2e-out/stage/e2e-control/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-bundle/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-bundle
+          path: e2e-out/stage/e2e-bundle/
+          retention-days: 1
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-head/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-head
+          path: e2e-out/stage/e2e-head/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t3/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-comment-rows-t3
+          path: e2e-out/stage/e2e-comment-rows-t3/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t4/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-comment-rows-t4
+          path: e2e-out/stage/e2e-comment-rows-t4/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t5/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-comment-rows-t5
+          path: e2e-out/stage/e2e-comment-rows-t5/
+          retention-days: 90
+          overwrite: true
+      - if: steps.live.outputs.dispatch == 'true'
+        id: dispatch
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_KIND: ${{ needs.resolve.outputs.kind }}
+          INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
+          E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
+          E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
+          E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
+          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
+          E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
+          E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
+          E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
+          E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
+          E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_STAGE_DIR: e2e-out/stage
+          E2E_WORK_DIR: e2e-out/work
+      - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-plan
+          path: e2e-out/stage/e2e-plan/
+          retention-days: 90
+          overwrite: true
+      - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-head/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-head
+          path: e2e-out/stage/e2e-head/
+          retention-days: 90
+          overwrite: true
+
+  sweep:
+    if: github.event_name == 'schedule' && github.event.schedule == '15,45 * * * *' && vars.E2E_LIVE_SETUP == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: e2e-setup
+    concurrency:
+      group: e2e-setup-sweep
+      cancel-in-progress: false
+    permissions: {actions: write, contents: write, deployments: read, pull-requests: write}
+    outputs:
+      restored: ${{ steps.staged.outputs.restored }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: ./.github/actions/e2e-dist
+      - run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js sweep
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INPUT_KIND: ${{ needs.resolve.outputs.kind }}
+          INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
+          E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
+          E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
+          E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
+          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
+          E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
+          E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
+          E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
+          E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
+          E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_STAGE_DIR: e2e-out/stage
+          E2E_WORK_DIR: e2e-out/work
+          E2E_SWEEP_START_SETUP: "1"
+          E2E_SWEEP_RESTORE: "1"
+      - id: staged
+        if: always()
+        run: |
+          mkdir -p e2e-out/stage
+          echo "restored=$(ls e2e-out/stage | grep -E '^e2e-restored-[0-9]+$' | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+      - if: always() && steps.staged.outputs.restored != '[]'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-sweep-stage
+          path: e2e-out/stage/
+          retention-days: 1
+
+  sweep-marks:
+    needs: sweep
+    if: always() && needs.sweep.outputs.restored != '' && needs.sweep.outputs.restored != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    strategy:
+      matrix:
+        name: ${{ fromJSON(needs.sweep.outputs.restored) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-sweep-stage
+          path: e2e-in/stage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: e2e-in/stage/${{ matrix.name }}/
+          retention-days: 90

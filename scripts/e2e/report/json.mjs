@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs"
-import { isContractTestId } from "./id.mjs"
+import { parseTestId } from "./id.mjs"
 
 export function readJson(file) {
   return JSON.parse(readFileSync(file, "utf8"))
@@ -10,9 +10,11 @@ export function checkId(id, where, problems) {
     problems.push(`${where}: id must be a string`)
     return false
   }
-  if (!isContractTestId(id)) {
+  try {
+    parseTestId(id)
+    return true
+  } catch {
     problems.push(`${where}: not a test id: ${id}`)
     return false
   }
-  return true
 }

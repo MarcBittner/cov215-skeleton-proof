@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "tests": [
     {
-      "id": "test:e2e/co-smoke.spec.ts::CO preview smoke › @smoke owner can load the Change Orders list and open a CO",
+      "id": "[readonly] › co-smoke.spec.ts › CO preview smoke › @smoke owner can load the Change Orders list and open a CO",
       "reason": "preview smoke: the signed-in shell and the Change Orders list load"
     }
   ]

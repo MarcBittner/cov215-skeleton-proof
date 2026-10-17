@@ -4,7 +4,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { validateShardPlan } from "./contract/formats.js"
 import { CONTRACT_VERSION } from "./contract/constants.js"
-import { catalogueFromList, weigher, packTestIds } from "./report/id.mjs"
+import { catalogueFromList, weigher, packTestIds, TEST_DIR } from "./report/id.mjs"
 import { readJson } from "./report/json.mjs"
 import { validateQuarantine } from "./report/quarantine.mjs"
 import { validateAlwaysRun } from "./report/always-run-audit.mjs"
@@ -19,6 +19,16 @@ export function shardCount({ selected, predictedMs, overheadMs, cap = SHARD_CAP 
   if (overheadMs >= OVERHEAD_CAP_MS) return Math.min(cap, selected)
   const byTime = Math.max(1, Math.ceil(predictedMs / (SHARD_BUDGET_MS - overheadMs)))
   return Math.min(cap, selected, byTime)
+}
+
+function listIds(doc, toList) {
+  if (!doc || typeof doc !== "object" || Array.isArray(doc) || !toList.size) return doc
+  const map = (id) => (typeof id === "string" ? (toList.get(id) ?? id) : id)
+  return {
+    ...doc,
+    ...(Array.isArray(doc.tests) ? { tests: doc.tests.map((t) => (t && typeof t === "object" ? { ...t, id: map(t.id) } : t)) } : {}),
+    ...(Array.isArray(doc.alwaysRun) ? { alwaysRun: doc.alwaysRun.map(map) } : {}),
+  }
 }
 
 export function readSelection(doc, catalogueIds) {
@@ -61,13 +71,13 @@ export function planShards({
   if (forceFullReason) fullRun = forceFullReason
   else if (selectMode !== "select") fullRun = "selection not live yet"
   else {
-    const sel = readSelection(selection, all)
+    const toList = new Map(catalogue.filter((t) => t.contractId).map((t) => [t.contractId, t.id]))
+    const sel = readSelection(listIds(selection, toList), all)
     fullRun = sel.fullRun
     chosen = sel.ids
   }
   const ids = fullRun ? all : [...new Set([...chosen, ...alwaysRunIds])].sort()
-  const projectOf = new Map(catalogue.map((t) => [t.id, t.project]))
-  const { weights, unknown } = weigher(durations, ids, (id) => projectOf.get(id))
+  const { weights, unknown } = weigher(durations, ids)
   const predictedMs = ids.reduce((sum, id) => sum + weights.get(id), 0)
   const count = shardCount({ selected: ids.length, predictedMs, overheadMs, cap })
   const { bins, loads } = count ? packTestIds(ids, weights, count) : { bins: [], loads: [] }
@@ -107,15 +117,21 @@ export function shardPlanDoc(plan, catalogue, { setupRunId, runKey }) {
       tests: s.ids.map((id) => {
         const t = byId.get(id)
         if (!t) throw new Error(`planned test ${id} is not in the catalogue`)
-        return { id, kind: t.kind, file: t.file, project: t.project, predicted_ms: plan.testMs[id] ?? 0 }
+        return { id: t.contractId, kind: t.kind, file: `${TEST_DIR}/${t.file}`, project: t.project, predicted_ms: plan.testMs[id] ?? 0 }
       }),
     })),
   }
 }
 
-export function planSummary(plan) {
+export function planSummary(plan, catalogue) {
+  const contract = new Map(catalogue.map((t) => [t.id, t.contractId]))
   const { shards, testMs: _testMs, ...rest } = plan
-  return { ...rest, shards: shards.map((s) => ({ shard: s.shard, tests: s.ids.length, predictedMs: s.predictedMs })) }
+  return {
+    ...rest,
+    alwaysRun: rest.alwaysRun.map((id) => contract.get(id) ?? id),
+    quarantined: rest.quarantined.map((id) => contract.get(id) ?? id),
+    shards: shards.map((s) => ({ shard: s.shard, tests: s.ids.length, predictedMs: s.predictedMs })),
+  }
 }
 
 function arg(argv, name) {
@@ -174,12 +190,11 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     for (const e of valid.errors) console.error(`plan.json: ${e}`)
     return 1
   }
-  const lineOf = new Map(catalogue.map((t) => [t.id, t.listLine]))
   mkdirSync(outDir, { recursive: true })
   writeFileSync(path.join(outDir, "plan.json"), JSON.stringify(doc, null, 2) + "\n")
-  writeFileSync(path.join(outDir, "plan-summary.json"), JSON.stringify(planSummary(plan), null, 2) + "\n")
+  writeFileSync(path.join(outDir, "plan-summary.json"), JSON.stringify(planSummary(plan, catalogue), null, 2) + "\n")
   for (const shard of plan.shards) {
-    writeFileSync(path.join(outDir, `shard-${shard.shard}.txt`), shard.ids.map((id) => lineOf.get(id)).join("\n") + "\n")
+    writeFileSync(path.join(outDir, `shard-${shard.shard}.txt`), shard.ids.join("\n") + "\n")
   }
   const line = plan.scope.mode === "full" ? `Full run: ${plan.scope.reason}` : `Selected run: ${plan.scope.selected} of ${plan.scope.total}`
   console.log(`${line}; ${plan.shards.length} shard(s); predicted ${Math.round(plan.predictedMs / 1000)} s; ${plan.unknownTimings} test(s) without a recorded time`)

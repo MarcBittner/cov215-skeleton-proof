@@ -8,6 +8,7 @@ import type { SetupPlan, ShardPlan } from "../contract/types.js"
 import { type GitHub, artifactFile, env, gitHubClient, output, readJsonFile, runArtifactJson, runArtifacts, summary } from "../lib/github.js"
 import { MARKER } from "./comment.mjs"
 import { hasLiveMention } from "./escape.mjs"
+import { contractIdFromLine } from "./id.mjs"
 import { proposeQuarantine } from "./flake-rate.mjs"
 import { type ReportHooks, type ReportTrigger, reportHooks } from "./hooks.js"
 import { findShardReports, readRowFiles, recount } from "./recount.mjs"
@@ -188,6 +189,21 @@ export interface ReportArgs {
   rowsDir: string | null
   outDir: string
   alwaysRunFile: string
+  quarantineFile: string
+}
+
+export function quarantinedIds(file: string, plan: ShardPlan) {
+  const planned = new Set(plan.shards.flatMap((s) => s.tests.map((t) => t.id)))
+  const doc = existsSync(file) ? readJsonFile<{ entries?: { id?: unknown }[] }>(file) : { entries: [] }
+  const ids: string[] = []
+  for (const e of doc.entries ?? []) {
+    try {
+      ids.push(contractIdFromLine(String(e.id)))
+    } catch {
+      continue
+    }
+  }
+  return ids.filter((id) => planned.has(id))
 }
 
 export async function writeReport(args: ReportArgs) {
@@ -195,7 +211,7 @@ export async function writeReport(args: ReportArgs) {
   const run = readSetupPlan(planDir)
   const plan = readShardPlan(planDir)
   const summaryFile = join(planDir, SUMMARY_FILE)
-  const planSummary = existsSync(summaryFile) ? readJsonFile<unknown>(summaryFile) : null
+  const planSummary = existsSync(summaryFile) ? readJsonFile<unknown>(summaryFile) : run.fixture ? null : { quarantined: quarantinedIds(args.quarantineFile, plan) }
   const scrub = existsSync(shardsDir) ? await scrubDirectory(shardsDir, {}) : { leaks: [] as string[], removed: [] as string[] }
   const problems = scrub.leaks.map((l: string) => `artifact scrub left a secret in ${l}`)
   const rowFiles = readRowFiles(rowsDir) as Record<string, unknown>
@@ -230,7 +246,7 @@ export async function writeReport(args: ReportArgs) {
     problems: results.problems.length,
     posted,
     finished: true,
-    restored: run.fixture || !run.mail.contained ? "not-contained" : "not-built",
+    restored: run.fixture || !run.mail.contained ? "not-contained" : null,
   }
   writeFileSync(join(outDir, "outcome.json"), JSON.stringify(outcome, null, 2) + "\n")
   return { outcome, comment }
@@ -288,6 +304,7 @@ export async function main(argv: string[], source: Record<string, string | undef
         rowsDir: rowsDir && existsSync(rowsDir) ? rowsDir : null,
         outDir,
         alwaysRunFile: source.ALWAYS_RUN_FILE ?? "e2e/always-run.json",
+        quarantineFile: source.QUARANTINE_FILE ?? "e2e/quarantine.json",
       })
       summary(comment, source)
       return

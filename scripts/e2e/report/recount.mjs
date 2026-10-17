@@ -4,6 +4,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { validateShardPlan } from "../contract/formats.js"
 import { readJson } from "./json.mjs"
+import { contractIdFromLine } from "./id.mjs"
 import { mergeResults } from "./merge.mjs"
 import { auditAlwaysRun, validateAlwaysRun } from "./always-run-audit.mjs"
 import { renderComment, SECTIONS } from "./comment.mjs"
@@ -68,7 +69,15 @@ export function recount({ plan, summary = null, shardReports, alwaysRunDoc, rowF
   const results = mergeResults({ plan, reports, quarantineIds: new Set(summary?.quarantined ?? []) })
   const planned = plan.shards.flatMap((s) => s.tests.map((t) => t.id))
   const alwaysRun = validateAlwaysRun(alwaysRunDoc, null)
-  const audit = auditAlwaysRun(alwaysRun.ids, planned)
+  const alwaysIds = []
+  for (const id of alwaysRun.ids) {
+    try {
+      alwaysIds.push(contractIdFromLine(id))
+    } catch (e) {
+      alwaysRun.problems.push(`e2e/always-run.json: ${e.message}`)
+    }
+  }
+  const audit = auditAlwaysRun(alwaysIds, planned)
   results.problems.push(...problems, ...alwaysRun.problems, ...audit.problems)
   if (results.problems.length) results.verdict = "failed"
   const runTag = String(meta?.runTag ?? meta?.setupRunId ?? "run")
