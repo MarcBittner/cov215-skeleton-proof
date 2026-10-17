@@ -72,8 +72,9 @@ from `scripts/e2e/contract` (index). Valid fixtures for every format: `__tests__
    does not guarantee.
 5. The mail projection lives in `control.json` (artifact `e2e-control`), as `06-tests-phase0.md` says; A1's artifact name
    `mail-projection` is not used. `run.json` carries only `{contained, effective_catch_all}` (A10).
-6. Artifact names `e2e-plan` (written once by prepare; the runner reads it), `e2e-plan-final` (written once by the dispatch
-   phase with the dispatched, failed or superseded state; report and sweep read it first), `e2e-control`, `e2e-bundle-ai`, `e2e-run-record`, `e2e-comment-rows-<task>`.
+6. Artifact names `e2e-plan` (a contain-time record naming the deployment, state `failed`, uploaded with `e2e-control` right after
+   mail is contained, then replaced once by planning before any dispatch; the runner reads it), `e2e-plan-final` (written once by
+   the dispatch phase with the dispatched, failed or superseded state; report and sweep read it first), `e2e-control`, `e2e-bundle-ai`, `e2e-run-record`, `e2e-comment-rows-<task>`.
 7. Test id form `test:<path>::<titles joined by " › ">`; `<anon#N>` is 1-based; `<module>` is only a whole chain.
 8. Convex edge kinds `ctx-run | scheduler | cron | http-route | helper-import | src-caller`; manifest `health` fields from the B1,
    B4 and B5 acceptance prints; generated tests carry `provenance: human`.

@@ -1,5 +1,6 @@
 export const SETUP_WORKFLOW = ".github/workflows/e2e-setup.yml"
 export const RUN_WORKFLOW = ".github/workflows/e2e-run.yml"
+export const REPORT_WORKFLOW = ".github/workflows/e2e-report.yml"
 export const TRUSTED_BRANCH = "staging"
 
 function workflowPath(run) {
@@ -18,25 +19,48 @@ export function runShas(runRecord) {
 
 export const TRUSTED_BRANCH_EVENTS = ["schedule", "workflow_dispatch"]
 
-export function untrustedSetupRun(setupRun) {
-  if (!setupRun || workflowPath(setupRun) !== SETUP_WORKFLOW) return `setup run is not ${SETUP_WORKFLOW}`
-  if (setupRun.event === "pull_request_target") return null
-  if (!TRUSTED_BRANCH_EVENTS.includes(setupRun.event)) return `setup run event ${setupRun.event} is not trusted`
-  if (setupRun.head_branch !== TRUSTED_BRANCH) return `setup run is from ${setupRun.head_branch}, not ${TRUSTED_BRANCH}`
-  return null
+/**
+ * @param {(path: string) => Promise<any>} get repo-relative GET ("" is the repository), null on 404
+ * @returns {(run: any, path?: string) => Promise<string | null>} the reason a run is not trusted, or null
+ */
+export function runVerifier(get) {
+  let repoId
+  let tagged
+  const onStaging = new Map()
+  return async function verify(run, path = SETUP_WORKFLOW) {
+    if (!run || workflowPath(run) !== path) return `run ${run?.id} is not ${path}`
+    if (run.event === "pull_request_target") {
+      if (path !== SETUP_WORKFLOW) return `run ${run.id} of ${path} came from pull_request_target`
+      if (repoId === undefined) repoId = (await get(""))?.id ?? null
+      if (repoId === null) return "the repository id could not be read"
+      const into = (run.pull_requests ?? []).some((p) => p?.base?.ref === TRUSTED_BRANCH && p?.base?.repo?.id === repoId)
+      return into ? null : `pull_request_target run ${run.id} is not for a pull request into ${TRUSTED_BRANCH} of this repository`
+    }
+    if (!TRUSTED_BRANCH_EVENTS.includes(run.event)) return `run ${run.id} event ${run.event} is not trusted`
+    if (run.head_branch !== TRUSTED_BRANCH) return `run ${run.id} is from ${run.head_branch}, not ${TRUSTED_BRANCH}`
+    if (tagged === undefined) tagged = (await get(`git/ref/tags/${TRUSTED_BRANCH}`)) !== null
+    if (tagged) return `a tag named ${TRUSTED_BRANCH} exists, so head_branch ${TRUSTED_BRANCH} does not prove the branch`
+    const sha = String(run.head_sha ?? "")
+    if (!/^[0-9a-f]{40}$/.test(sha)) return `run ${run.id} has no head sha`
+    if (!onStaging.has(sha)) {
+      const c = await get(`compare/refs/heads/${TRUSTED_BRANCH}...${sha}`)
+      onStaging.set(sha, c?.status === "identical" || c?.status === "behind")
+    }
+    return onStaging.get(sha) ? null : `run ${run.id} head ${sha.slice(0, 12)} is not on refs/heads/${TRUSTED_BRANCH}`
+  }
 }
 
-export function checkSetupRun({ setupRun, runRecord }) {
-  const untrusted = untrustedSetupRun(setupRun)
+export function checkSetupRun({ setupRun, runRecord, untrusted }) {
+  if (untrusted === undefined) return "setup run trust was not verified"
   if (untrusted) return untrusted
   if (!runRecord || String(runRecord.setup_run_id) !== String(setupRun.id)) return "run.json does not belong to this setup run"
   return null
 }
 
-/** @param {{ setupRun: any, runRecord: any, run: any, jobs?: { status: string }[] }} args @returns {{ decision: string, reason: string | null, run_key?: string }} */
-export function checkRunTrust({ setupRun, runRecord, run, jobs = [] }) {
+/** @param {{ setupRun: any, untrusted: string | null | undefined, runRecord: any, run: any, jobs?: { status: string }[] }} args @returns {{ decision: string, reason: string | null, run_key?: string }} */
+export function checkRunTrust({ setupRun, untrusted, runRecord, run, jobs = [] }) {
   const refuse = (reason) => ({ decision: "refuse", reason })
-  const setupProblem = checkSetupRun({ setupRun, runRecord })
+  const setupProblem = checkSetupRun({ setupRun, runRecord, untrusted })
   if (setupProblem) return refuse(setupProblem)
   if (!run) return refuse("no e2e-run run")
   const dispatch = recordedDispatches(runRecord).find((d) => d.run_id === String(run.id))

@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url"
 import { ARTIFACTS, FILES } from "../contract/constants.js"
 import { validateSetupPlan, validateShardPlan } from "../contract/formats.js"
 import type { SetupPlan, ShardPlan } from "../contract/types.js"
-import { type GitHub, artifactFile, env, gitHubClient, output, readJsonFile, runArtifactJson, runArtifacts, summary } from "../lib/github.js"
+import { type Artifact, type GitHub, artifactFile, env, gitHubClient, output, readJsonFile, runArtifactJson, runArtifacts, summary } from "../lib/github.js"
 import { MARKER } from "./comment.mjs"
 import { hasLiveMention } from "./escape.mjs"
 import { contractIdFromLine } from "./id.mjs"
@@ -15,7 +15,7 @@ import { type ReportHooks, type ReportTrigger, reportHooks } from "./hooks.js"
 import { findShardReports, readRowFiles, recount } from "./recount.mjs"
 import { scrubDirectory } from "./scrub.mjs"
 import { SHOTS_BRANCH } from "./shots.mjs"
-import { TRUSTED_BRANCH, checkPlanBinding, checkRunTrust, checkSetupRun, untrustedSetupRun } from "./trust.mjs"
+import { REPORT_WORKFLOW, TRUSTED_BRANCH, checkPlanBinding, checkRunTrust, checkSetupRun, runVerifier } from "./trust.mjs"
 
 export const REPORT_BOT = "github-actions[bot]"
 export const CHECK_NAME = "e2e / staging report"
@@ -30,6 +30,7 @@ interface ApiRun {
   id: number
   path: string
   event?: string
+  pull_requests?: { base?: { ref?: string; repo?: { id?: number } } }[]
   head_branch: string | null
   head_sha: string
   status: string | null
@@ -55,9 +56,42 @@ export function readShardPlan(dir: string): ShardPlan {
   return result.value
 }
 
+export const OUTCOME_WINDOW_MS = 8 * 24 * 3600 * 1000
+
+export interface Trusted {
+  verify: (run: ApiRun | null, path?: string) => Promise<string | null>
+  outcomes: () => Promise<Map<string, Artifact>>
+}
+
+const trustedCache = new WeakMap<GitHub, Trusted>()
+
+export function trustedOf(gh: GitHub, now = Date.now()): Trusted {
+  const hit = trustedCache.get(gh)
+  if (hit) return hit
+  const check = runVerifier((p: string) => gh.get(p ? `/${p}` : ""))
+  const verify = async (run: ApiRun | null, path?: string) => (run ? check(run, path) : "no such run")
+  let outcomes: Promise<Map<string, Artifact>> | null = null
+  const load = async () => {
+    const since = new Date(now - OUTCOME_WINDOW_MS).toISOString()
+    const map = new Map<string, Artifact>()
+    for (let page = 1; page <= 10; page += 1) {
+      const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-report.yml/runs?created=>=${since}&per_page=100&page=${page}`)
+      const runs = body?.workflow_runs ?? []
+      for (const r of runs) {
+        if (await verify(r, REPORT_WORKFLOW)) continue
+        for (const a of await runArtifacts(gh, String(r.id))) if (a.name.startsWith("e2e-outcome-") && !map.has(a.name)) map.set(a.name, a)
+      }
+      if (runs.length < 100) break
+    }
+    return map
+  }
+  const t: Trusted = { verify, outcomes: () => (outcomes ??= load()) }
+  trustedCache.set(gh, t)
+  return t
+}
+
 export async function isReported(gh: GitHub, setupRunId: string) {
-  const body = await gh.get<{ total_count: number }>(`/actions/artifacts?name=${OUTCOME_ARTIFACT(setupRunId)}&per_page=1`)
-  return (body?.total_count ?? 0) > 0
+  return (await trustedOf(gh).outcomes()).has(OUTCOME_ARTIFACT(setupRunId))
 }
 
 export async function listTargets(gh: GitHub, requested: string | undefined, now = Date.now()): Promise<{ targets: Target[]; checked: number }> {
@@ -71,7 +105,7 @@ export async function listTargets(gh: GitHub, requested: string | undefined, now
     const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?status=completed&created=>=${since}&per_page=100`)
     for (const r of body?.workflow_runs ?? []) {
       checked += 1
-      if (untrustedSetupRun(r)) continue
+      if (await trustedOf(gh).verify(r)) continue
       const names = (await runArtifacts(gh, String(r.id))).map((a) => a.name)
       if (names.includes(ARTIFACTS.plan) && !(await isReported(gh, String(r.id)))) ids.push(String(r.id))
     }
@@ -107,7 +141,8 @@ export async function trustRun(args: {
   const now = args.now ?? Date.now
   if (await isReported(gh, setupRunId)) return { ok: false, record: false, reason: `setup run ${setupRunId} already has a report` }
   const setupRun = await gh.get<ApiRun>(`/actions/runs/${setupRunId}`)
-  const genuine = !!setupRun && !checkSetupRun({ setupRun, runRecord: { setup_run_id: setupRunId } })
+  const untrusted = await trustedOf(gh).verify(setupRun)
+  const genuine = !checkSetupRun({ setupRun, runRecord: { setup_run_id: setupRunId }, untrusted })
   let runRecord: SetupPlan
   let plan: ShardPlan
   try {
@@ -116,7 +151,7 @@ export async function trustRun(args: {
   } catch (e) {
     return { ok: false, record: genuine, reason: e instanceof Error ? e.message : String(e) }
   }
-  const setupProblem = checkSetupRun({ setupRun, runRecord })
+  const setupProblem = checkSetupRun({ setupRun, runRecord, untrusted })
   if (setupProblem) return { ok: false, record: genuine, reason: setupProblem }
   const main = runRecord.dispatches.find((d) => d.role === "main" && d.dispatched_run_id)
   if (!main?.dispatched_run_id) return { ok: false, record: true, reason: `setup run ${setupRunId} recorded no dispatched run (state ${runRecord.state})` }
@@ -124,7 +159,7 @@ export async function trustRun(args: {
   for (;;) {
     const run = await gh.get<ApiRun>(`/actions/runs/${main.dispatched_run_id}`)
     const jobs = run ? ((await gh.get<{ jobs: { status: string }[] }>(`/actions/runs/${run.id}/jobs?per_page=100`))?.jobs ?? []) : []
-    const decision = checkRunTrust({ setupRun, runRecord, run, jobs })
+    const decision = checkRunTrust({ setupRun, untrusted, runRecord, run, jobs })
     if (decision.decision === "report") {
       const binding = checkPlanBinding(plan, decision.run_key ?? "")
       if (binding) return { ok: false, record: true, reason: binding }
@@ -319,15 +354,15 @@ export async function baseRowsFor(gh: GitHub, pr: number, prSha: string, now = D
   const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?created=>=${since}&per_page=100`)
   const out: BaseRow[] = []
   for (const r of body?.workflow_runs ?? []) {
-    if (untrustedSetupRun(r)) continue
+    if (await trustedOf(gh).verify(r)) continue
     const id = String(r.id)
     const doc =
       (await runArtifactJson<unknown>(gh, id, ARTIFACTS.planFinal, FILES.setupPlan).catch(() => null)) ??
       (await runArtifactJson<unknown>(gh, id, ARTIFACTS.plan, FILES.setupPlan).catch(() => null))
     const plan = doc ? validateSetupPlan(doc) : null
     if (!plan?.ok || plan.value.kind !== "base" || plan.value.pr !== pr || plan.value.pr_sha !== prSha) continue
-    const [artifact] = (await gh.get<{ artifacts: { id: number; name: string; expired: boolean }[] }>(`/actions/artifacts?name=${OUTCOME_ARTIFACT(id)}&per_page=1`))?.artifacts ?? []
-    const text = artifact && !artifact.expired ? await artifactFile(gh, artifact, BASE_ROWS_FILE).catch(() => null) : null
+    const artifact = (await trustedOf(gh).outcomes()).get(OUTCOME_ARTIFACT(id))
+    const text = artifact ? await artifactFile(gh, artifact, BASE_ROWS_FILE).catch(() => null) : null
     if (text) out.push(...(JSON.parse(text) as { rows: BaseRow[] }).rows)
     else out.push({ text: `fail-on-base run ${id} has not reported yet; its rows appear on the next report of this head`, level: "info", ids: [] })
   }
@@ -336,13 +371,7 @@ export async function baseRowsFor(gh: GitHub, pr: number, prSha: string, now = D
 
 export async function flakeProposals(gh: GitHub, quarantineIds: Set<string>, now = Date.now(), maxRuns = 60) {
   const since = now - 7 * 24 * 3600 * 1000
-  const found: { id: number; name: string; expired: boolean; created_at?: string }[] = []
-  for (let page = 1; page <= 5; page += 1) {
-    const body = await gh.get<{ artifacts: { id: number; name: string; expired: boolean; created_at?: string }[] }>(`/actions/artifacts?per_page=100&page=${page}`)
-    const items = body?.artifacts ?? []
-    found.push(...items.filter((a) => a.name.startsWith("e2e-outcome-") && !a.expired && Date.parse(a.created_at ?? "") >= since))
-    if (items.length < 100) break
-  }
+  const found = [...(await trustedOf(gh, now).outcomes()).values()].filter((a) => Date.parse(a.created_at ?? "") >= since)
   const docs = []
   for (const a of found.slice(0, maxRuns)) {
     const text = await artifactFile(gh, a, "results.json").catch(() => null)
@@ -375,6 +404,14 @@ export async function main(argv: string[], source: Record<string, string | undef
     }
     case "report": {
       const [planDir, shardsDir, rowsDir, outDir] = rest
+      const failed = (e: unknown) => {
+        mkdirSync(outDir, { recursive: true })
+        const reason = (e instanceof Error ? e.message : String(e)).slice(0, 500)
+        const file = join(outDir, "outcome.json")
+        const prior = existsSync(file) ? (readJsonFile(file) as Record<string, unknown>) : {}
+        writeFileSync(file, JSON.stringify({ restored: null, ...prior, setup_run_id: env("SETUP_RUN_ID", source), run_id: source.RUN_ID ?? null, verdict: "error", reason, finished: false }, null, 2) + "\n")
+        throw e
+      }
       const { comment } = await writeReport({
         gh,
         hooks: deps.hooks ?? reportHooks,
@@ -387,7 +424,7 @@ export async function main(argv: string[], source: Record<string, string | undef
         outDir,
         alwaysRunFile: source.ALWAYS_RUN_FILE ?? "e2e/always-run.json",
         quarantineFile: source.QUARANTINE_FILE ?? "e2e/quarantine.json",
-      })
+      }).catch(failed)
       summary(comment, source)
       return
     }

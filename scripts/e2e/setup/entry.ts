@@ -13,7 +13,10 @@ import { readSetupPlan } from "../report/cli.js"
 import { FIXTURE_CASES, KINDS, type FixtureCase, deploymentKey, parseSetupInputs, runTaskSteps } from "./t2/skeleton.js"
 import { readConvexTarget } from "./t2/resolve-convex.js"
 import { createGitHubReader } from "./t2/resolve-github.js"
-import { readPreview } from "./t2/resolve.js"
+import { READY_TIMEOUT_MS, readPreview, type PullRequestTargetEvent } from "./t2/resolve.js"
+import { createSetupGitHub } from "./t2/github.js"
+import { resolvePullRequestTarget } from "./t2/resolve-target.js"
+import { editsBuildRules, skipsBuild } from "./t2/skip.js"
 import type { SetupStepContext, SetupTask } from "./t2/step.js"
 import { runSetupStep as t3 } from "./t3/index.js"
 import { runSetupStep as t4 } from "./t4/index.js"
@@ -142,9 +145,12 @@ export async function dispatchRun(gh: GitHub, planDir: string, now: () => Date =
   return { runId: String(body.workflow_run_id), htmlUrl: body.html_url ?? null, ref: main.ref }
 }
 
+export type PrTarget = { ready: string } | { fallback: string } | { refused: string }
+
 export interface ResolveClients {
   pull(pr: number): Promise<{ headSha: string; headRepo: string | null; baseRepo: string } | null>
-  readyConvex(sha: string): Promise<string | null>
+  prTarget(pr: number): Promise<PrTarget>
+  baseConvex(sha: string): Promise<string | null>
   mergeBase(sha: string): Promise<string>
 }
 
@@ -159,32 +165,59 @@ export async function resolveLive(a: { kind: RunKind; pr: number | null; setupRu
   if (!a.repo) throw new Error("GITHUB_REPOSITORY is not set")
   const c = clients()
   const pull = await c.pull(a.pr)
-  if (!pull) return { refused: `PR #${a.pr} was not found`, headSha: a.sha, deployment: `pr-${a.pr}` }
-  if (pull.headRepo !== a.repo || pull.baseRepo !== a.repo) return { refused: "fork PRs are not run", headSha: a.sha, deployment: `pr-${a.pr}` }
-  if (a.kind === "base") return { refused: null, headSha: pull.headSha, deployment: `e2e/base/${(await c.mergeBase(pull.headSha)).slice(0, 12)}` }
-  if (a.kind === "pr") return { refused: null, headSha: pull.headSha, deployment: (await c.readyConvex(pull.headSha)) ?? `pr-${a.pr}` }
-  return { refused: null, headSha: pull.headSha, deployment: `pr-${a.pr}` }
+  const refuse = (refused: string): LiveResolution => ({ refused, headSha: a.sha, deployment: `pr-${a.pr}` })
+  if (!pull) return refuse(`PR #${a.pr} was not found`)
+  if (pull.headRepo !== a.repo || pull.baseRepo !== a.repo) return refuse("fork PRs are not run")
+  if (a.kind === "base") {
+    const sha12 = (await c.mergeBase(pull.headSha)).slice(0, 12)
+    return { refused: null, headSha: pull.headSha, deployment: (await c.baseConvex(sha12)) ?? `base-${sha12}` }
+  }
+  if (a.kind !== "pr") return { refused: null, headSha: pull.headSha, deployment: `${a.kind}-${a.setupRunId}` }
+  const t = await c.prTarget(a.pr)
+  if ("refused" in t) return refuse(t.refused)
+  return { refused: null, headSha: pull.headSha, deployment: "ready" in t ? t.ready : t.fallback }
 }
 
-export function resolveClients(gh: GitHub, token: string): ResolveClients {
+export function resolveClients(gh: GitHub, token: string, opts: { setupRunId: string; stagingDir: string; readyBoundMs: number }): ResolveClients {
+  const reader = createGitHubReader({ repo: gh.repo, token })
+  const setup = createSetupGitHub({ repo: gh.repo, token })
+  const fetchText = async (url: string) => {
+    if (!url.startsWith("https://")) throw new Error(`refusing ${url}`)
+    const res = await fetch(url, { signal: AbortSignal.timeout(30_000) })
+    if (!res.ok) throw new Error(`${res.status} for ${new URL(url).pathname}`)
+    return res.text()
+  }
   return {
     async pull(pr) {
       const p = await gh.get<{ head: { sha: string; repo: { full_name: string } | null }; base: { repo: { full_name: string } } }>(`/pulls/${pr}`)
       return p ? { headSha: p.head.sha, headRepo: p.head.repo?.full_name ?? null, baseRepo: p.base.repo.full_name } : null
     },
-    async readyConvex(sha) {
+    async prTarget(pr) {
+      const event = { action: "synchronize", number: pr, pull_request: { number: pr } } as PullRequestTargetEvent
+      const r = await resolvePullRequestTarget(event, {
+        reader,
+        fetchText,
+        repo: gh.repo,
+        headSkipsBuild: (prSha) => skipsBuild({ github: setup, reader, pr, prSha, stagingDir: opts.stagingDir }),
+        wait: { timeoutMs: opts.readyBoundMs },
+      })
+      if (r.status === "ready") return { ready: r.convex.deployment }
+      if (r.status === "skip") return { refused: `not run: ${r.reason}` }
+      if (editsBuildRules(await setup.listPullFiles(pr)).length) return { fallback: `fallback-${opts.setupRunId}` }
+      return { refused: `no READY preview in time: ${r.reason}` }
+    },
+    async baseConvex(sha12) {
       try {
-        const preview = await readPreview(createGitHubReader({ repo: gh.repo, token }), sha)
-        if (preview.state !== "READY") return null
-        return (await readConvexTarget(preview.url, async (url) => (await fetch(url, { signal: AbortSignal.timeout(30_000) })).text())).deployment
+        const branch = await setup.getBranch(`e2e/base/${sha12}`)
+        if (!branch) return null
+        const preview = await readPreview(reader, branch.sha)
+        return preview.state === "READY" ? (await readConvexTarget(preview.url, fetchText)).deployment : null
       } catch {
         return null
       }
     },
     async mergeBase(sha) {
-      const c = await gh.get<{ merge_base_commit: { sha: string } }>(`/compare/staging...${sha}`)
-      if (!c) throw new Error(`no merge base for ${sha}`)
-      return c.merge_base_commit.sha
+      return setup.mergeBase("staging", sha)
     },
   }
 }
@@ -216,7 +249,9 @@ export async function main(argv: string[], source: Record<string, string | undef
       const live = gated
         ? await resolveLive(
             { kind: inputs.kind, pr: pr ?? inputPr, setupRunId, repo: source.GITHUB_REPOSITORY ?? "", sha: env("GITHUB_SHA", source) },
-            () => deps.resolve ?? resolveClients(client(), env("GH_TOKEN", source)),
+            () =>
+              deps.resolve ??
+              resolveClients(client(), env("GH_TOKEN", source), { setupRunId, stagingDir: process.cwd(), readyBoundMs: Number(source.E2E_READY_BOUND_MS ?? READY_TIMEOUT_MS) }),
           )
         : null
       if (live?.refused) summary(`## e2e setup\n\nNot run: ${live.refused}. Nothing keyed ran.`, source)
@@ -225,7 +260,7 @@ export async function main(argv: string[], source: Record<string, string | undef
           mode: inputs.mode,
           kind: inputs.kind,
           fixture_case: inputs.fixtureCase,
-          pr: String(inputPr ?? ""),
+          pr: String(pr ?? inputPr ?? ""),
           deployment: live?.deployment ?? deploymentKey(inputs, setupRunId, pr),
           live: String(gated && !live?.refused),
           refused: live?.refused ?? "",

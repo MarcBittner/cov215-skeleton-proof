@@ -34,7 +34,7 @@ jobs:
       (github.event_name != 'pull_request_target' && github.event.schedule != '15,45 * * * *') ||
       (github.event_name == 'pull_request_target' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     permissions: {contents: read, deployments: read, pull-requests: read}
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
@@ -64,7 +64,9 @@ jobs:
     if: needs.resolve.outputs.live == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions: {contents: read}
+    permissions: {contents: read, pull-requests: write}
+    outputs:
+      refused: ${{ steps.list.outputs.refused }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -78,8 +80,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
-      - run: node scripts/e2e/dist/scripts/e2e/setup/t2/static-list.js . e2e-in/tree e2e-list.json
-      - uses: actions/upload-artifact@v4
+      - id: list
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/static-list.js . e2e-in/tree e2e-list.json
+        env:
+          SETUP_RUN_ID: ${{ github.run_id }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          E2E_STAGE_DIR: e2e-out/stage
+      - if: always() && steps.list.outputs.refused != '' && hashFiles('e2e-out/stage/e2e-head/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-head
+          path: e2e-out/stage/e2e-head/
+          retention-days: 90
+      - if: steps.list.outputs.refused != ''
+        run: node scripts/e2e/dist/scripts/e2e/setup/t2/static-list.js note
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          REFUSED: ${{ steps.list.outputs.refused }}
+      - if: steps.list.outputs.refused == ''
+        uses: actions/upload-artifact@v4
         with:
           name: e2e-list
           path: e2e-list.json
@@ -87,7 +108,7 @@ jobs:
 
   prepare:
     needs: [resolve, list]
-    if: always() && needs.resolve.result == 'success' && needs.resolve.outputs.refused == '' && needs.list.result != 'failure' && needs.list.result != 'cancelled'
+    if: always() && needs.resolve.result == 'success' && needs.resolve.outputs.refused == '' && needs.list.outputs.refused == '' && needs.list.result != 'failure' && needs.list.result != 'cancelled'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: ${{ needs.resolve.outputs.live == 'true' && 'e2e-setup' || '' }}
@@ -136,9 +157,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
-          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
-          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
+          LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
           E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
@@ -149,6 +170,7 @@ jobs:
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
           E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
           E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_DEPLOYMENT: ${{ needs.resolve.outputs.deployment }}
           E2E_STAGE_DIR: e2e-out/stage
           E2E_WORK_DIR: e2e-out/work
       - if: always() && steps.contain.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-control/**') != ''
@@ -165,22 +187,24 @@ jobs:
           path: e2e-out/stage/e2e-head/
           retention-days: 90
           overwrite: true
-      - if: always() && steps.contain.outcome != 'skipped' && steps.contain.outputs.contained != 'true' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
+      - if: always() && steps.contain.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
         uses: actions/upload-artifact@v4
         with:
           name: e2e-plan
           path: e2e-out/stage/e2e-plan/
           retention-days: 90
+          overwrite: true
       - if: steps.contain.outputs.contained == 'true'
         id: live
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js prepare
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
-          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
-          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
+          LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
           E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
@@ -191,6 +215,7 @@ jobs:
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
           E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
           E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_DEPLOYMENT: ${{ needs.resolve.outputs.deployment }}
           E2E_STAGE_DIR: e2e-out/stage
           E2E_WORK_DIR: e2e-out/work
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan/**') != ''
@@ -199,6 +224,7 @@ jobs:
           name: e2e-plan
           path: e2e-out/stage/e2e-plan/
           retention-days: 90
+          overwrite: true
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-control/**') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -244,9 +270,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
-          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
-          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
+          LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
           E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
@@ -257,6 +283,7 @@ jobs:
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
           E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
           E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_DEPLOYMENT: ${{ needs.resolve.outputs.deployment }}
           E2E_STAGE_DIR: e2e-out/stage
           E2E_WORK_DIR: e2e-out/work
       - if: always() && steps.dispatch.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-plan-final/**') != ''
@@ -293,9 +320,9 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
-          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
-          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
-          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
+          LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
           E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
@@ -306,6 +333,7 @@ jobs:
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
           E2E_MANIFEST_SCHEMA_VERSION: ${{ vars.E2E_MANIFEST_SCHEMA_VERSION }}
           E2E_LIST_FILE: e2e-in/list/e2e-list.json
+          E2E_DEPLOYMENT: ${{ needs.resolve.outputs.deployment }}
           E2E_STAGE_DIR: e2e-out/stage
           E2E_WORK_DIR: e2e-out/work
           E2E_SWEEP_START_SETUP: "1"

@@ -86,8 +86,8 @@ jobs:
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/report-restore.js e2e-out/outcome
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
-          E2E_BREAK_GLASS_PASSWORD: ${{ secrets.E2E_BREAK_GLASS_PASSWORD }}
+          CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
+          E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
           E2E_SETUP_ADMIN_EMAIL: ${{ vars.E2E_SETUP_ADMIN_EMAIL }}
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
