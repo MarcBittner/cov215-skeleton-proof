@@ -256,13 +256,13 @@ const summary = (md: string) => {
 
 const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8")) as T
 
-async function api<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<{ status: number; body: T }> {
+async function api<T>(path: string, init: { method?: string; body?: unknown; version?: string } = {}): Promise<{ status: number; body: T }> {
   const res = await fetch(`${process.env.GITHUB_API_URL ?? "https://api.github.com"}/repos/${env("GITHUB_REPOSITORY")}${path}`, {
     method: init.method ?? "GET",
     headers: {
       authorization: `Bearer ${env("GH_TOKEN")}`,
       accept: "application/vnd.github+json",
-      "x-github-api-version": "2022-11-28",
+      "x-github-api-version": init.version ?? "2022-11-28",
       ...(init.body ? { "content-type": "application/json" } : {}),
     },
     body: init.body ? JSON.stringify(init.body) : undefined,
@@ -344,6 +344,7 @@ async function cmdDispatch(planDir: string, outDir: string) {
   const { status, body } = await api<{ workflow_run_id?: number; html_url?: string }>(`/actions/workflows/e2e-run.yml/dispatches`, {
     method: "POST",
     body: { ref: run.branch, inputs: { setup_run_id: run.run_id, run_key: run.run_key } },
+    version: "2026-03-10",
   })
   if (!body?.workflow_run_id) throw new Error(`dispatch of e2e-run.yml returned ${status} with no workflow_run_id`)
   const record: DispatchJson = { setup_run_id: run.run_id, run_key: run.run_key, run_id: String(body.workflow_run_id), html_url: body.html_url ?? null }
