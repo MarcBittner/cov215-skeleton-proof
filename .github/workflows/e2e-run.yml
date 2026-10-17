@@ -24,6 +24,8 @@ jobs:
       live: ${{ steps.inputs.outputs.live }}
       bundle_sha: ${{ steps.inputs.outputs.bundle_sha }}
       base_url: ${{ steps.inputs.outputs.base_url }}
+      kind: ${{ steps.inputs.outputs.kind }}
+      convex_url: ${{ steps.inputs.outputs.convex_url }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -41,8 +43,27 @@ jobs:
           SETUP_RUN_ID: ${{ inputs.setup_run_id }}
           RUN_KEY: ${{ inputs.run_key }}
 
+  static:
+    needs: inputs
+    if: needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {actions: read, contents: read}
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: ./.github/actions/e2e-dist
+        with: {cache: "false"}
+      - run: node scripts/e2e/dist/scripts/e2e/map/nightly/static.js . e2e-out/nightly-static
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nightly-static
+          path: e2e-out/nightly-static/
+          retention-days: 30
+
   shards:
     needs: inputs
+    if: needs.inputs.outputs.kind != 'gate' || needs.inputs.outputs.live != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions: {actions: read, contents: read}
@@ -81,6 +102,38 @@ jobs:
           run-id: ${{ inputs.setup_run_id }}
           github-token: ${{ github.token }}
       - if: needs.inputs.outputs.live == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-map
+          path: e2e-in/map
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-map-plan
+          path: e2e-in/map-plan
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: needs.inputs.outputs.live == 'true'
+        name: app map environment
+        run: |
+          if [ -f e2e-in/map/manifest.json ]; then echo "E2E_MAP_DIR=$PWD/e2e-in/map" >> "$GITHUB_ENV"; fi
+          node scripts/e2e/dist/scripts/e2e/map/nightly/runner.js map-tests e2e-in/plan e2e-out/map-tests.json
+          echo "E2E_MAP_TESTS=$PWD/e2e-out/map-tests.json" >> "$GITHUB_ENV"
+          if [ "$KIND" = nightly ]; then
+            mkdir -p e2e-out/map-raw e2e-out/behaviour-raw
+            { echo "E2E_MAP=1"; echo "E2E_MAP_MODE=record"; echo "E2E_MAP_OUT=$PWD/e2e-out/map-raw"; echo "E2E_MAP_BEHAVIOUR_OUT=$PWD/e2e-out/behaviour-raw"; } >> "$GITHUB_ENV"
+          else
+            echo "E2E_MAP_MODE=replay" >> "$GITHUB_ENV"
+          fi
+        env:
+          KIND: ${{ needs.inputs.outputs.kind }}
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          RUN_KEY: ${{ inputs.run_key }}
+          SHARD: ${{ matrix.shard }}
+      - if: needs.inputs.outputs.live == 'true'
         run: npx playwright install --with-deps chromium
       - if: needs.inputs.outputs.live == 'true'
         id: playwright
@@ -100,18 +153,136 @@ jobs:
           mkdir -p e2e-out/shard
           if [ -f playwright-report/results.json ]; then cp playwright-report/results.json e2e-out/shard/report.json; fi
           if [ -d test-results ]; then cp -r test-results e2e-out/shard/test-results; fi
+      - if: always() && needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+        id: capture
+        run: |
+          mkdir -p "e2e-out/shard/nightly/nightly-instrumented-run-$SHARD"
+          node scripts/e2e/dist/scripts/e2e/map/capture/cli.js record --raw e2e-out/map-raw --report e2e-out/shard/report.json \
+            --out "e2e-out/shard/nightly/nightly-instrumented-run-$SHARD/tests.json" \
+            --project "$(node scripts/e2e/dist/scripts/e2e/map/nightly/runner.js projects e2e-in/plan)"
+        env:
+          SHARD: ${{ matrix.shard }}
+          RUN_KEY: ${{ inputs.run_key }}
+          E2E_COVERAGE_REQUIRED: ${{ vars.E2E_COVERAGE_REQUIRED }}
+      - if: always() && needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+        id: behaviour
+        run: node scripts/e2e/dist/scripts/e2e/map/behaviour/cli.js --in e2e-out/behaviour-raw --out "e2e-out/shard/nightly/nightly-behaviour-$SHARD"
+        env:
+          SHARD: ${{ matrix.shard }}
+      - if: always() && needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+        id: crawl
+        run: |
+          for plan in $(node scripts/e2e/dist/scripts/e2e/map/nightly/runner.js crawl-plans e2e-in/map-plan); do
+            name="$(basename "$plan" .json)"
+            E2E_CRAWL_PLAN="$plan" E2E_CRAWL_OUT="e2e-out/crawl/$name" npx playwright test --project map e2e/map/crawl/crawl.map.ts || echo "::warning::$name exited non-zero"
+          done
+          node scripts/e2e/dist/scripts/e2e/map/nightly/runner.js crawl-merge e2e-out/crawl "e2e-out/shard/nightly/nightly-crawl-$SHARD" e2e-in/map-plan
+        env:
+          CI: "true"
+          E2E_BASE_URL: ${{ needs.inputs.outputs.base_url }}
+          E2E_BUNDLE_DIR: e2e-in/bundle
+          E2E_BUNDLE_SHA: ${{ needs.inputs.outputs.bundle_sha }}
+          E2E_TICKET_KEY: ${{ secrets.E2E_TICKET_KEY }}
+          E2E_SHARD: ${{ matrix.shard }}
+          E2E_RUN_KEY: ${{ inputs.run_key }}
+          E2E_SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ vars.E2E_CLERK_PUBLISHABLE_KEY }}
+          SHARD: ${{ matrix.shard }}
+      - if: always() && needs.inputs.outputs.live == 'true' && needs.inputs.outputs.kind == 'nightly'
+        id: guard
+        run: node scripts/e2e/dist/scripts/e2e/map/capture/cli.js guard e2e-out/shard
       - if: always()
         id: scrub
         run: node scripts/e2e/dist/scripts/e2e/report/scrub.mjs e2e-out/shard
-      - if: always() && steps.scrub.outcome == 'success'
+      - if: always() && steps.scrub.outcome == 'success' && steps.guard.outcome != 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-shard-${{ matrix.shard }}
           path: e2e-out/shard/
           retention-days: 30
+      - if: always() && steps.scrub.outcome == 'success' && steps.guard.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-instrumented-run-${{ matrix.shard }}
+          path: e2e-out/shard/nightly/nightly-instrumented-run-${{ matrix.shard }}/
+          retention-days: 30
+      - if: always() && steps.scrub.outcome == 'success' && steps.guard.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-behaviour-${{ matrix.shard }}
+          path: e2e-out/shard/nightly/nightly-behaviour-${{ matrix.shard }}/
+          retention-days: 30
+      - if: always() && steps.scrub.outcome == 'success' && steps.guard.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-crawl-${{ matrix.shard }}
+          path: e2e-out/shard/nightly/nightly-crawl-${{ matrix.shard }}/
+          retention-days: 30
+
+  gate:
+    needs: inputs
+    if: needs.inputs.outputs.kind == 'gate' && needs.inputs.outputs.live == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions: {actions: read, contents: read}
+    steps:
+      - uses: actions/checkout@v4
+        with: {persist-credentials: false}
+      - uses: ./.github/actions/e2e-dist
+        with: {cache: "false"}
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-plan
+          path: e2e-in/plan
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+      - id: gate
+        run: |
+          mkdir -p e2e-out/gate
+          node scripts/e2e/dist/scripts/e2e/gate/gate-run.js
+        env:
+          E2E_RUN_JSON: e2e-in/plan/run.json
+          E2E_RUN_KEY: ${{ inputs.run_key }}
+          E2E_BASE_URL: ${{ needs.inputs.outputs.base_url }}
+          E2E_CONVEX_URL: ${{ needs.inputs.outputs.convex_url }}
+          E2E_GATE_OUT: e2e-out/gate/gate-check.json
+      - uses: actions/download-artifact@v4
+        with:
+          name: e2e-bundle
+          path: e2e-in/bundle
+          run-id: ${{ inputs.setup_run_id }}
+          github-token: ${{ github.token }}
+      - run: npx playwright install --with-deps chromium
+      - id: playwright
+        continue-on-error: true
+        run: npx playwright test --project drafts "$GATE_SPEC" $GATE_PLAYWRIGHT_ARGS
+        env:
+          CI: "true"
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
+          GATE_SPEC: ${{ steps.gate.outputs.spec }}
+          GATE_PLAYWRIGHT_ARGS: ${{ steps.gate.outputs.playwright_args }}
+          E2E_GATE_BREAK: ${{ steps.gate.outputs.break }}
+          E2E_GATE_BREAK_TOKEN: ${{ steps.gate.outputs.break_token }}
+          E2E_BASE_URL: ${{ needs.inputs.outputs.base_url }}
+          E2E_CONVEX_URL: ${{ needs.inputs.outputs.convex_url }}
+          E2E_BUNDLE_DIR: e2e-in/bundle
+          E2E_BUNDLE_SHA: ${{ needs.inputs.outputs.bundle_sha }}
+          E2E_TICKET_KEY: ${{ secrets.E2E_TICKET_KEY }}
+          E2E_SHARD: ${{ fromJSON(needs.inputs.outputs.shards)[0] }}
+          E2E_RUN_KEY: ${{ inputs.run_key }}
+          E2E_SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+      - if: always() && hashFiles('e2e-out/gate/gate-check.json') != ''
+        id: result
+        run: node scripts/e2e/dist/scripts/e2e/gate/gate-result.js playwright-report/results.json e2e-out/gate/gate-check.json e2e-in/plan/run.json e2e-out/gate/gate-result.json
+      - if: always() && steps.result.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-gate-result
+          path: e2e-out/gate/
+          retention-days: 30
 
   fan-in:
-    needs: [inputs, shards]
+    needs: [inputs, static, shards, gate]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

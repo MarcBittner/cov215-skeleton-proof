@@ -1,4 +1,59 @@
 {
   "schemaVersion": 1,
-  "entries": []
+  "entries": [
+    {
+      "id": "[app] › email-bounce-late-reply.spec.ts › Exception: bounce + late reply after closure › @exception a bounced delivery is surfaced in the Story timeline",
+      "key": "email-bounce-not-recorded",
+      "reason": "The app records no bounce: no kind \"delivery\" message writer in convex/ (src/lib/rfi-delivery-state.ts), so seedBouncedRfi cannot be built.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › co-verifier-portal.spec.ts › CO-Verifier portal detail page (#1065) › (A) the page mounts as a CO-Ver admin: guard admits, header + summary render",
+      "key": "co-verifier-portal-a",
+      "reason": "/co-verifier-portal/* redirects to /co-verification/* (next.config.ts) and the portal panels are gone from src/app; retarget to /co-verification or delete is a product call.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › co-verifier-portal.spec.ts › CO-Verifier portal detail page (#1065) › (B) the context bundle renders, including the notCaptured gaps",
+      "key": "co-verifier-portal-b",
+      "reason": "/co-verifier-portal/* redirects to /co-verification/* (next.config.ts) and the portal panels are gone from src/app; retarget to /co-verification or delete is a product call.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › co-verifier-portal.spec.ts › CO-Verifier portal detail page (#1065) › (C) the provocations panel renders",
+      "key": "co-verifier-portal-c",
+      "reason": "/co-verifier-portal/* redirects to /co-verification/* (next.config.ts) and the portal panels are gone from src/app; retarget to /co-verification or delete is a product call.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › co-verifier-portal.spec.ts › CO-Verifier portal detail page (#1065) › (D) the money-split header renders",
+      "key": "co-verifier-portal-d",
+      "reason": "/co-verifier-portal/* redirects to /co-verification/* (next.config.ts) and the portal panels are gone from src/app; retarget to /co-verification or delete is a product call.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › co-verifier-portal.spec.ts › CO-Verifier portal detail page (#1065) › (E) the write dialogs open on an accepting queue status",
+      "key": "co-verifier-portal-e",
+      "reason": "/co-verifier-portal/* redirects to /co-verification/* (next.config.ts) and the portal panels are gone from src/app; retarget to /co-verification or delete is a product call.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[app] › signin-route.spec.ts › sign-in route defaults (#1061 / #1072) › (b) an account WITH a password signs in and lands authenticated",
+      "key": "signin-password-leg",
+      "reason": "Needs a run-created user with a password; setup issues no passwords and the bundle carries no secrets (plan A5).",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[onboarding] › parity/onboarding-happy-path.spec.ts › [@smoke] onboarding happy path — downstream data (fresh tenant) › owner drives project → contract → docs → people → activate; DB matches at every step",
+      "key": "run-ai-e2e-onboarding-happy-path",
+      "reason": "AI extraction calls Anthropic; runs only in the AI dispatch with RUN_AI_E2E=1.",
+      "added": "2026-10-17"
+    },
+    {
+      "id": "[onboarding] › parity/onboarding-docx-extract.spec.ts › [@smoke] onboarding .docx SOV extraction — FMT-4 (mammoth, no Gotenberg) › a dropped .docx base contract extracts SOV line items via mammoth (no Gotenberg host)",
+      "key": "run-ai-e2e-onboarding-docx",
+      "reason": "AI extraction calls Anthropic; runs only in the AI dispatch with RUN_AI_E2E=1.",
+      "added": "2026-10-17"
+    }
+  ]
 }

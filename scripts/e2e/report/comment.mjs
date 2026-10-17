@@ -39,7 +39,11 @@ function clip(text, max) {
 
 function rowHeading(row, esc, max) {
   const { title, where } = display(row)
-  return `**${esc(clip(title, max))}** (${esc(where)})`
+  return `${row.ai ? "AI-added: " : ""}**${esc(clip(title, max))}** (${esc(where)})`
+}
+
+export function countsLine(counts) {
+  return `${counts.passed} passed · ${counts.failed} failed · ${counts.flaky} flaky · ${counts.notRun} not run · ${counts.quarantined} known broken (of ${counts.planned} planned)`
 }
 
 function failedBlock(row, esc, level, shotUrl) {
@@ -104,9 +108,8 @@ function render({ results, scope, rowFiles, meta, esc, shotUrl }, level) {
   const quarantined = rows.filter((r) => r.status === "quarantined")
   const passed = rows.filter((r) => r.status === "passed")
   const out = [MARKER, `## Browser tests: ${results.verdict === "passed" ? "passed" : "failed"}`, esc(scopeLine(scope))]
-  out.push(
-    `${counts.passed} passed · ${counts.failed} failed · ${counts.flaky} flaky · ${counts.notRun} not run · ${counts.quarantined} known broken (of ${counts.planned} planned)`,
-  )
+  out.push(countsLine(counts))
+  if (results.aiCounts) out.push(`AI-added: ${countsLine(results.aiCounts)}; not part of the deterministic selection`)
   if (meta) {
     const bits = []
     if (meta.setupRunId && /^\d+$/.test(String(meta.setupRunId))) {

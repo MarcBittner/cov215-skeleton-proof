@@ -40,7 +40,7 @@ export function readRowFiles(rowsDir) {
 }
 
 export function scopeOf(plan, summary) {
-  const selected = (plan.shards ?? []).reduce((n, s) => n + (s.tests?.length ?? 0), 0)
+  const selected = (plan.shards ?? []).filter((s) => s.role !== "ai").reduce((n, s) => n + (s.tests?.length ?? 0), 0)
   if (plan.full_run) return { mode: "full", reason: plan.full_run, selected, total: summary?.scope?.total ?? selected }
   return { mode: "selected", reason: null, selected, total: summary?.scope?.total ?? selected }
 }

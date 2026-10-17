@@ -10,7 +10,7 @@ import {
   staleNightlyBranches,
 } from "./branch.js"
 import { READY_BOUND_MS, type DeploymentsClient, waitForNightlyPreview } from "./ready.js"
-import { type NightEntry, type StoreIndex, isPublished, recordNight } from "./store-index.js"
+import { type NightEntry, type StoreIndex, isPublished } from "./store-index.js"
 
 export interface Branch {
   name: string
@@ -24,15 +24,18 @@ export interface NightlyGitClient extends MarkerGit {
   deleteBranch(name: string): Promise<void>
 }
 
-export interface IndexStore {
+export interface IndexReader {
   readIndex(): Promise<StoreIndex>
+}
+
+export interface IndexStore extends IndexReader {
   writeIndex(index: StoreIndex, message: string): Promise<void>
 }
 
 export interface SetupNightDeps {
   git: NightlyGitClient
   deployments: DeploymentsClient
-  store: IndexStore
+  store: IndexReader
   now?: () => number
   sleep?: (ms: number) => Promise<void>
   log?: (line: string) => void
@@ -105,8 +108,7 @@ export async function setupNight(deps: SetupNightDeps, input: SetupNightInput): 
       status: "failed-job",
       reason: `${branch}: ${reason}`,
     }
-    await deps.store.writeIndex(recordNight(await deps.store.readIndex(), entry), `nightly ${branch} failed-job`)
-    log(`::error::night failed: ${entry.reason}`)
+    log(`::error::night failed: ${entry.reason} (recorded in this setup run; the next publish folds it into the index)`)
     return { outcome: "failed", branch, entry, stale }
   }
 

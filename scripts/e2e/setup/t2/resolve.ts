@@ -47,7 +47,7 @@ export type Preview =
   | { state: "NONE"; sha: string }
 
 export type BoundPullRequest =
-  | { run: true; pr: number; prSha: string; headRef: string; repo: string }
+  | { run: true; pr: number; prSha: string; headRef: string; repo: string; headRepo: string }
   | { run: false; pr: number | null; reason: "no-pr" | "closed" | "base" | "draft" | "fork" }
 
 const newestFirst = <T extends { id: number; created_at: string }>(a: T, b: T) =>
@@ -132,7 +132,7 @@ export async function bindPullRequest(
     return { run: false, pr, reason: "fork" }
   }
   if (!/^[0-9a-f]{40}$/.test(pull.head.sha)) throw new Error(`pull ${pr} head sha is not a sha`)
-  return { run: true, pr, prSha: pull.head.sha, headRef: pull.head.ref, repo }
+  return { run: true, pr, prSha: pull.head.sha, headRef: pull.head.ref, repo: pull.base.repo.full_name, headRepo: pull.head.repo.full_name }
 }
 
 export type WaitOptions = {

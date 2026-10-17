@@ -6,6 +6,8 @@ export type ControlId = { kind: "control"; cell: CellId; controlKey: string }
 export type MapId =
   | { kind: "fn"; path: string; chain: string[] }
   | { kind: "udf"; module: string; exportName: string }
+  | { kind: "cron"; name: string }
+  | { kind: "http"; method: string; path: string }
   | { kind: "table"; table: string }
   | { kind: "index"; table: string; index: string }
   | { kind: "route"; pattern: string }
@@ -24,6 +26,10 @@ export const MODULE_CHAIN = "<module>"
 
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 const ANON = /^<anon#[1-9][0-9]*>$/
+const CHAIN_SEGMENT = /^(?:[A-Za-z_$][A-Za-z0-9_$]*|<(?:get|set)>[A-Za-z_$][A-Za-z0-9_$]*)(?:#(?:[2-9]|[1-9][0-9]+))?$/
+const HTTP_METHOD = /^[A-Z]+$/
+const HTTP_PATH = /^(?:\/[^\s|]*|<anon#[1-9][0-9]*>\*)$/
+const CRON_NAME = /^[^|\r\n\t]+$/
 const SLUG = /^[a-z][a-z0-9-]*$/
 const FLAG = /^(off|on|custom:[0-9a-f]{8,64})$/
 const UDF_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/
@@ -51,7 +57,7 @@ function isTitle(t: string): boolean {
 
 function isChain(chain: string[]): boolean {
   if (chain.length === 1 && chain[0] === MODULE_CHAIN) return true
-  return chain.length > 0 && chain.every((s) => IDENT.test(s) || ANON.test(s))
+  return chain.length > 0 && chain.every((s) => CHAIN_SEGMENT.test(s) || ANON.test(s))
 }
 
 function isUdfModule(m: string): boolean {
@@ -104,6 +110,15 @@ export function parseId(s: string): MapId | null {
       const [module, exportName] = parts
       return isUdfModule(module) && IDENT.test(exportName) ? { kind: "udf", module, exportName } : null
     }
+    case "cron":
+      return CRON_NAME.test(body) && body === body.trim() ? { kind: "cron", name: body } : null
+    case "http": {
+      const sp = body.indexOf(" ")
+      if (sp < 0) return null
+      const method = body.slice(0, sp)
+      const path = body.slice(sp + 1)
+      return HTTP_METHOD.test(method) && HTTP_PATH.test(path) ? { kind: "http", method, path } : null
+    }
     case "table":
       return IDENT.test(body) ? { kind: "table", table: body } : null
     case "index": {
@@ -152,6 +167,10 @@ export function formatId(id: MapId): string {
       return `fn:${id.path}::${id.chain.join(".")}`
     case "udf":
       return `udf:${id.module}:${id.exportName}`
+    case "cron":
+      return `cron:${id.name}`
+    case "http":
+      return `http:${id.method} ${id.path}`
     case "table":
       return `table:${id.table}`
     case "index":

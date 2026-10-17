@@ -4,18 +4,21 @@ import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
 import { ARTIFACTS, FILES } from "../contract/constants.js"
-import { validateSetupPlan, validateShardPlan } from "../contract/formats.js"
-import type { SetupPlan, ShardPlan } from "../contract/types.js"
+import { validateRunRecord, validateSelection, validateSetupPlan, validateShardPlan } from "../contract/formats.js"
+import type { RunRecord, Selection, SetupPlan, ShardPlan, TestKind } from "../contract/types.js"
+import { sampledPush } from "../measure/ground-truth.js"
 import { type Artifact, type GitHub, artifactFile, env, gitHubClient, output, readJsonFile, runArtifactJson, runArtifacts, summary } from "../lib/github.js"
 import { MARKER } from "./comment.mjs"
 import { hasLiveMention } from "./escape.mjs"
 import { contractIdFromLine } from "./id.mjs"
 import { proposeQuarantine } from "./flake-rate.mjs"
+import { priorOutcomeFor, type PriorOutcome } from "../map/accept/report.js"
+import { NIGHT_FILE, type NightEntry } from "../map/nightly/store-index.js"
 import { type ReportHooks, type ReportTrigger, reportHooks } from "./hooks.js"
 import { findShardReports, readRowFiles, recount } from "./recount.mjs"
 import { scrubDirectory } from "./scrub.mjs"
 import { SHOTS_BRANCH } from "./shots.mjs"
-import { REPORT_WORKFLOW, TRUSTED_BRANCH, checkPlanBinding, checkRunTrust, checkSetupRun, runVerifier } from "./trust.mjs"
+import { REPORT_WORKFLOW, TRUSTED_BRANCH, TRUSTED_BRANCH_EVENTS, checkPlanBinding, checkRunTrust, checkSetupRun, runVerifier } from "./trust.mjs"
 
 export const REPORT_BOT = "github-actions[bot]"
 export const CHECK_NAME = "e2e / staging report"
@@ -25,6 +28,14 @@ export const OUTCOME_ARTIFACT = (setupRunId: string) => `e2e-outcome-${setupRunI
 export const SUMMARY_FILE = "plan-summary.json"
 export const MAX_SHOTS = 40
 export const MAX_SHOT_BYTES = 2_000_000
+export const RUN_RECORD_ARTIFACT = (setupRunId: string) => `${ARTIFACTS.runRecord}-${setupRunId}`
+export const RUN_RECORD_FILE = "run-record.json"
+export const RUN_RECORDS_DIR = "run-records"
+export const DRAFTS_ARTIFACT = "e2e-drafts"
+export const DRAFTS_STATE_FILE = "drafts-state.json"
+export const DRAFTS_SOURCE_FILE = "drafts-state-source.json"
+export const DRAFTS_WINDOW_MS = 30 * 24 * 3600 * 1000
+const RUN_ID = /^[1-9][0-9]{0,19}$/
 
 interface ApiRun {
   id: number
@@ -61,6 +72,7 @@ export const OUTCOME_WINDOW_MS = 8 * 24 * 3600 * 1000
 export interface Trusted {
   verify: (run: ApiRun | null, path?: string) => Promise<string | null>
   outcomes: () => Promise<Map<string, Artifact>>
+  runRecords: () => Promise<Map<string, Artifact>>
 }
 
 const trustedCache = new WeakMap<GitHub, Trusted>()
@@ -70,22 +82,30 @@ export function trustedOf(gh: GitHub, now = Date.now()): Trusted {
   if (hit) return hit
   const check = runVerifier((p: string) => gh.get(p ? `/${p}` : ""))
   const verify = async (run: ApiRun | null, path?: string) => (run ? check(run, path) : "no such run")
-  let outcomes: Promise<Map<string, Artifact>> | null = null
+  let loaded: Promise<{ outcomes: Map<string, Artifact>; runRecords: Map<string, Artifact> }> | null = null
   const load = async () => {
     const since = new Date(now - OUTCOME_WINDOW_MS).toISOString()
-    const map = new Map<string, Artifact>()
+    const outcomes = new Map<string, Artifact>()
+    const runRecords = new Map<string, Artifact>()
     for (let page = 1; page <= 10; page += 1) {
       const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-report.yml/runs?created=>=${since}&per_page=100&page=${page}`)
       const runs = body?.workflow_runs ?? []
       for (const r of runs) {
         if (await verify(r, REPORT_WORKFLOW)) continue
-        for (const a of await runArtifacts(gh, String(r.id))) if (a.name.startsWith("e2e-outcome-") && !map.has(a.name)) map.set(a.name, a)
+        for (const a of await runArtifacts(gh, String(r.id))) {
+          if (a.name.startsWith("e2e-outcome-") && !outcomes.has(a.name)) outcomes.set(a.name, a)
+          if (a.name.startsWith(`${ARTIFACTS.runRecord}-`) && !runRecords.has(a.name)) runRecords.set(a.name, a)
+        }
       }
       if (runs.length < 100) break
     }
-    return map
+    return { outcomes, runRecords }
   }
-  const t: Trusted = { verify, outcomes: () => (outcomes ??= load()) }
+  const t: Trusted = {
+    verify,
+    outcomes: async () => (await (loaded ??= load())).outcomes,
+    runRecords: async () => (await (loaded ??= load())).runRecords,
+  }
   trustedCache.set(gh, t)
   return t
 }
@@ -254,6 +274,198 @@ export interface ReportArgs {
   quarantineFile: string
 }
 
+export async function priorAcceptOutcome(gh: GitHub, pr: number): Promise<PriorOutcome | null> {
+  const newest = [...(await trustedOf(gh).outcomes()).values()].sort((a, b) => Date.parse(b.created_at ?? "") - Date.parse(a.created_at ?? ""))
+  for (const a of newest) {
+    const text = await artifactFile(gh, a, "outcome.json").catch(() => null)
+    const found = text ? priorOutcomeFor([JSON.parse(text) as unknown], pr) : null
+    if (found) return found
+  }
+  return null
+}
+
+export const NIGHT_JOB_CONCLUSIONS = new Set(["success", "failure", "cancelled", "skipped"])
+
+export async function nightRunJobs(gh: GitHub, runId: string): Promise<{ job: string; result: string }[]> {
+  const jobs = (await gh.get<{ jobs: { name: string; conclusion: string | null }[] }>(`/actions/runs/${runId}/jobs?per_page=100`))?.jobs ?? []
+  return jobs
+    .filter((j) => j.name.split(" ")[0] !== "fan-in")
+    .map((j) => ({ job: j.name, result: j.conclusion && NIGHT_JOB_CONCLUSIONS.has(j.conclusion) ? j.conclusion : j.conclusion === null ? "cancelled" : "failure" }))
+}
+
+export async function setupNights(gh: GitHub, now = Date.now()): Promise<NightEntry[]> {
+  const since = new Date(now - OUTCOME_WINDOW_MS).toISOString()
+  const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?status=completed&created=>=${since}&per_page=100`)
+  const out: NightEntry[] = []
+  for (const r of body?.workflow_runs ?? []) {
+    if (await trustedOf(gh).verify(r)) continue
+    const [head] = await runArtifacts(gh, String(r.id), "e2e-head")
+    const text = head ? await artifactFile(gh, head, NIGHT_FILE).catch(() => null) : null
+    if (!text) continue
+    const doc = JSON.parse(text) as { setup_run_id?: unknown; entry?: NightEntry }
+    if (doc.setup_run_id === String(r.id) && doc.entry && doc.entry.status !== "published") out.push(doc.entry)
+  }
+  return out.sort((a, b) => Date.parse(a.builtAt) - Date.parse(b.builtAt))
+}
+
+export async function trustedRunRecords(gh: GitHub, log: (line: string) => void = () => {}): Promise<RunRecord[]> {
+  const out: RunRecord[] = []
+  for (const [name, a] of [...(await trustedOf(gh).runRecords()).entries()].sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))) {
+    const id = name.slice(ARTIFACTS.runRecord.length + 1)
+    if (!RUN_ID.test(id)) continue
+    const text = await artifactFile(gh, a, RUN_RECORD_FILE).catch(() => null)
+    if (text === null) {
+      log(`run record ${name}: no ${RUN_RECORD_FILE}`)
+      continue
+    }
+    let checked
+    try {
+      checked = validateRunRecord(JSON.parse(text))
+    } catch (e) {
+      log(`run record ${name}: ${(e as Error).message}`)
+      continue
+    }
+    if (!checked.ok) log(`run record ${name}: ${checked.errors.slice(0, 3).join("; ")}`)
+    else if (checked.value.setupRunId !== id) log(`run record ${name} names setup run ${checked.value.setupRunId}`)
+    else out.push(checked.value)
+  }
+  return out
+}
+
+const RESULT_OF: Record<string, RunRecord["results"][number]["result"]> = { passed: "passed", failed: "failed", flaky: "flaky", "not-run": "not-run" }
+
+type ResultRow = { id: string; status: string; reason?: string; attempts?: number; quarantined?: boolean; ai?: boolean }
+
+export function recordResults(plan: ShardPlan, rows: readonly ResultRow[]): RunRecord["results"] {
+  const kinds = new Map<string, TestKind>()
+  for (const shard of plan.shards) for (const t of shard.tests) kinds.set(t.id, t.kind)
+  const out: RunRecord["results"] = []
+  for (const row of rows) {
+    const kind = kinds.get(row.id)
+    if (!kind) continue
+    const result = row.status === "quarantined" ? (row.reason === "known broken, failed" ? "failed" : "not-run") : RESULT_OF[row.status]
+    if (!result) continue
+    out.push({ id: row.id, kind, result, quarantined: row.quarantined === true || row.status === "quarantined", retries: Math.max(0, (row.attempts ?? 0) - 1) })
+  }
+  return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+export function readSelection(planDir: string): Selection | null {
+  const file = join(planDir, FILES.selection)
+  if (!existsSync(file)) return null
+  const checked = validateSelection(readJsonFile(file))
+  if (!checked.ok) throw new Error(`${FILES.selection} is invalid: ${checked.errors.slice(0, 3).join("; ")}`)
+  return checked.value
+}
+
+async function treeOf(gh: GitHub, sha: string): Promise<string | null> {
+  const c = await gh.get<{ tree?: { sha?: string } }>(`/git/commits/${sha}`).catch(() => null)
+  return c?.tree?.sha ?? null
+}
+
+export async function buildRunRecord(args: {
+  gh: GitHub
+  setupRunId: string
+  runId: string | null
+  planDir: string
+  outcomeDir: string
+  now?: number
+  log?: (line: string) => void
+}): Promise<RunRecord | null> {
+  const { gh, setupRunId, planDir, outcomeDir } = args
+  const log = args.log ?? (() => {})
+  const run = readSetupPlan(planDir)
+  if (run.fixture) return null
+  if (run.setup_run_id !== setupRunId) throw new Error(`run.json is for setup run ${run.setup_run_id}, not ${setupRunId}`)
+  const plan = readShardPlan(planDir)
+  const results = readJsonFile<{ rows?: ResultRow[] }>(join(outcomeDir, "results.json"))
+  const selection = readSelection(planDir)
+  const aiDoc = await runArtifactJson<{ setupRunId?: unknown; runRecordAi?: unknown }>(gh, setupRunId, ARTIFACTS.selectAi, FILES.selectAi).catch(() => null)
+  const ai = aiDoc && aiDoc.setupRunId === setupRunId && aiDoc.runRecordAi ? (aiDoc.runRecordAi as RunRecord["ai"]) : null
+  const controlDoc = await runArtifactJson<{ setup_run_id?: unknown; seeded_escape?: { function_id: string; break_sha: string; branch: string; dropped: string[] } | null }>(
+    gh,
+    setupRunId,
+    ARTIFACTS.control,
+    FILES.control,
+  ).catch(() => null)
+  const escape = controlDoc && controlDoc.setup_run_id === setupRunId ? (controlDoc.seeded_escape ?? null) : null
+  let headSha = run.pr_sha
+  let mergeCommitSha: string | null = null
+  let treeEqual: boolean | null = null
+  if (run.kind === "postmerge" && run.pr) {
+    mergeCommitSha = run.target_sha ?? run.pr_sha
+    const pull = await gh.get<{ head?: { sha?: string } }>(`/pulls/${run.pr}`).catch(() => null)
+    const head = pull?.head?.sha
+    if (head && /^[0-9a-f]{40}$/.test(head)) {
+      headSha = head
+      const [a, b] = [await treeOf(gh, head), await treeOf(gh, mergeCommitSha)]
+      treeEqual = a !== null && b !== null ? a === b : null
+    }
+  }
+  const record: RunRecord = {
+    schemaVersion: "1.0",
+    setupRunId,
+    runId: args.runId && RUN_ID.test(args.runId) ? args.runId : null,
+    kind: run.kind,
+    pr: run.pr,
+    headSha,
+    baseSha: selection?.baseSha ?? run.base_sha ?? null,
+    mergeCommitSha,
+    treeEqual,
+    recordedAt: new Date(args.now ?? Date.now()).toISOString(),
+    groundTruth: plan.select_mode === "full",
+    sampled: run.kind === "pr" && run.pr ? sampledPush(run.pr, headSha) : null,
+    selection: selection
+      ? { mode: selection.mode, rule: selection.rule, fullRun: selection.fullRun, mapSha: selection.mapSha, selected: [...new Set(selection.tests.map((t) => t.id))].sort() }
+      : null,
+    results: recordResults(plan, results.rows ?? []),
+    ai,
+    control: escape ? { kind: "seeded-escape", functionId: escape.function_id, breakSha: escape.break_sha, branch: escape.branch, dropped: [...escape.dropped] } : null,
+  }
+  const checked = validateRunRecord(record)
+  if (checked.ok) return checked.value
+  if (record.ai !== null) {
+    const without = validateRunRecord({ ...record, ai: null })
+    if (without.ok) {
+      log(`::warning::the AI part of run record ${setupRunId} is invalid and was left out: ${checked.errors.slice(0, 3).join("; ")}`)
+      return without.value
+    }
+  }
+  throw new Error(`run record ${setupRunId} is invalid: ${checked.errors.slice(0, 5).join("; ")}`)
+}
+
+const draftsStateOk = (text: string) => {
+  try {
+    const s = JSON.parse(text) as { version?: unknown; pending?: unknown }
+    return !!s && typeof s === "object" && s.version === 1 && Array.isArray(s.pending)
+  } catch {
+    return false
+  }
+}
+
+export async function trustedDraftsState(gh: GitHub, setupRunId: string, now = Date.now()): Promise<{ setupRunId: string; text: string } | null> {
+  if (!RUN_ID.test(setupRunId)) throw new Error(`setup run id "${setupRunId}" is not a run id`)
+  const since = new Date(now - DRAFTS_WINDOW_MS).toISOString()
+  const runs: ApiRun[] = []
+  for (let page = 1; page <= 10; page += 1) {
+    const body = await gh.get<{ workflow_runs: ApiRun[] }>(`/actions/workflows/e2e-setup.yml/runs?status=completed&created=>=${since}&per_page=100&page=${page}`)
+    const list = body?.workflow_runs ?? []
+    runs.push(...list)
+    if (list.length < 100) break
+  }
+  const earlier = runs
+    .filter((r) => RUN_ID.test(String(r.id)) && BigInt(r.id) < BigInt(setupRunId) && TRUSTED_BRANCH_EVENTS.includes(String(r.event)))
+    .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? 1 : -1))
+  for (const r of earlier) {
+    if (await trustedOf(gh).verify(r)) continue
+    const [artifact] = (await runArtifacts(gh, String(r.id), DRAFTS_ARTIFACT)).filter((a) => a.name === DRAFTS_ARTIFACT)
+    if (!artifact) continue
+    const text = await artifactFile(gh, artifact, DRAFTS_STATE_FILE).catch(() => null)
+    if (text !== null && draftsStateOk(text)) return { setupRunId: String(r.id), text }
+  }
+  return null
+}
+
 export function quarantinedIds(file: string, plan: ShardPlan) {
   const planned = new Set(plan.shards.flatMap((s) => s.tests.map((t) => t.id)))
   const doc = existsSync(file) ? readJsonFile<{ entries?: { id?: unknown }[] }>(file) : { entries: [] }
@@ -277,7 +489,17 @@ export async function writeReport(args: ReportArgs) {
   const scrub = existsSync(shardsDir) ? await scrubDirectory(shardsDir, {}) : { leaks: [] as string[], removed: [] as string[] }
   const problems = scrub.leaks.map((l: string) => `artifact scrub left a secret in ${l}`)
   const rowFiles = readRowFiles(rowsDir) as Record<string, unknown>
-  const binding = run.pr && run.kind === "pr" ? await hooks.rebind({ gh, pr: run.pr, headSha: run.pr_sha, setupRunId, trigger, rowFiles }) : null
+  const reports = findShardReports(shardsDir).flatMap((r: { file: string | null }) => {
+    try {
+      return r.file ? [readJsonFile<unknown>(r.file)] : []
+    } catch {
+      return []
+    }
+  })
+  const binding =
+    run.pr && run.kind === "pr"
+      ? await hooks.rebind({ gh, pr: run.pr, headSha: run.pr_sha, setupRunId, trigger, rowFiles, reports, priorOutcome: (pr) => priorAcceptOutcome(gh, pr) })
+      : null
   const baseRows = run.pr && run.kind === "pr" ? await baseRowsFor(gh, run.pr, run.pr_sha) : []
   const meta = {
     setupRunId,
@@ -329,6 +551,7 @@ export async function writeReport(args: ReportArgs) {
     superseded,
     finished: true,
     restored: run.fixture || !run.mail.contained ? "not-contained" : null,
+    accept: superseded ? null : (binding?.accept ?? null),
   }
   writeFileSync(join(outDir, "outcome.json"), JSON.stringify(outcome, null, 2) + "\n")
   return { outcome, comment }
@@ -426,6 +649,57 @@ export async function main(argv: string[], source: Record<string, string | undef
         quarantineFile: source.QUARANTINE_FILE ?? "e2e/quarantine.json",
       }).catch(failed)
       summary(comment, source)
+      return
+    }
+    case "map-inputs": {
+      const [planDir, outDir] = rest
+      const run = readSetupPlan(planDir)
+      if (run.kind !== "nightly" || run.fixture) {
+        output({ map: "false" }, source)
+        return
+      }
+      mkdirSync(outDir, { recursive: true })
+      writeFileSync(join(outDir, "run-jobs.json"), JSON.stringify(await nightRunJobs(gh, env("RUN_ID", source)), null, 2) + "\n")
+      writeFileSync(join(outDir, "setup-nights.json"), JSON.stringify(await setupNights(gh), null, 2) + "\n")
+      const recordsDir = join(outDir, RUN_RECORDS_DIR)
+      mkdirSync(recordsDir, { recursive: true })
+      const records = await trustedRunRecords(gh, (line) => console.log(line))
+      for (const r of records) writeFileSync(join(recordsDir, `${r.setupRunId}.json`), JSON.stringify(r, null, 2) + "\n")
+      output({ map: "true", sha: run.pr_sha, built_at: run.created_at }, source)
+      return
+    }
+    case "run-record": {
+      const [planDir, outcomeDir, outDir] = rest
+      const setupRunId = env("SETUP_RUN_ID", source)
+      const record = await buildRunRecord({ gh, setupRunId, runId: source.RUN_ID ?? null, planDir, outcomeDir, log: (line) => console.log(line) })
+      if (!record) {
+        summary(`Run record: none for fixture setup run ${setupRunId}.`, source)
+        return
+      }
+      mkdirSync(outDir, { recursive: true })
+      writeFileSync(join(outDir, RUN_RECORD_FILE), JSON.stringify(record, null, 2) + "\n")
+      const ai = record.ai ? `${record.ai.mode} ${record.ai.outcome}, ${record.ai.additions.length} AI-added` : "no AI call"
+      summary(`Run record ${RUN_RECORD_ARTIFACT(setupRunId)}: ${record.selection ? `${record.selection.selected.length} selected deterministically` : "no selection"}; ${ai}; ${record.results.length} results.`, source)
+      return
+    }
+    case "drafts-state": {
+      const dir = rest[0]
+      const setupRunId = env("SETUP_RUN_ID", source)
+      if (existsSync(join(dir, DRAFTS_STATE_FILE))) {
+        output({ drafts_state: "own" }, source)
+        return
+      }
+      const found = await trustedDraftsState(gh, setupRunId)
+      if (!found) {
+        summary(`Drafts state: setup run ${setupRunId} wrote none and no earlier trusted setup run has one; the next drafts input starts empty.`, source)
+        output({ drafts_state: "none" }, source)
+        return
+      }
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(join(dir, DRAFTS_STATE_FILE), found.text)
+      writeFileSync(join(dir, DRAFTS_SOURCE_FILE), JSON.stringify({ setup_run_id: found.setupRunId }, null, 2) + "\n")
+      summary(`Drafts state: setup run ${setupRunId} wrote none; carried forward from trusted setup run ${found.setupRunId}.`, source)
+      output({ drafts_state: `fallback:${found.setupRunId}` }, source)
       return
     }
     case "reject": {

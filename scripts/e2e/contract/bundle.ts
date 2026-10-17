@@ -58,13 +58,17 @@ export function sealBundle(bundle: Bundle, recipientPublicKey: string | KeyObjec
   }
 }
 
-export type OpenExpectations = { sha?: string; setup_run_id?: string; run_key?: string }
+export type OpenExpectations = { sha: string; setup_run_id: string; run_key: string }
 
-export function openBundle(envelope: unknown, privateKey: string | KeyObject, expect: OpenExpectations = {}): Bundle {
+export function openBundle(envelope: unknown, privateKey: string | KeyObject, expect: OpenExpectations): Bundle {
+  for (const field of ["sha", "setup_run_id", "run_key"] as const) {
+    const want = (expect as Partial<OpenExpectations> | undefined)?.[field]
+    if (typeof want !== "string" || want.length === 0) throw new Error(`openBundle needs the expected ${field}`)
+  }
   const env = orThrow("bundle envelope", validateBundleEnvelope(envelope))
   for (const field of ["sha", "setup_run_id", "run_key"] as const) {
     const want = expect[field]
-    if (want !== undefined && env[field] !== want) {
+    if (env[field] !== want) {
       throw new Error(`bundle ${field} ${env[field]} does not match expected ${want}`)
     }
   }

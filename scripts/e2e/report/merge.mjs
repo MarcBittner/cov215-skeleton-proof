@@ -72,14 +72,14 @@ function detailOf(test, status) {
   }
 }
 
-/** @param {{ plan: any, reports: { shard: number | null, report: any }[], quarantineIds?: Set<string> }} args @returns {{ verdict: string, counts: Record<string, number>, rows: any[], problems: string[], unplanned: string[] }} */
+/** @param {{ plan: any, reports: { shard: number | null, report: any }[], quarantineIds?: Set<string> }} args @returns {{ verdict: string, counts: Record<string, number>, aiCounts?: Record<string, number>, rows: any[], problems: string[], unplanned: string[] }} */
 export function mergeResults({ plan, reports, quarantineIds = new Set() }) {
   const problems = []
   const planned = new Map()
   for (const shard of plan.shards ?? []) {
     for (const t of shard.tests ?? []) {
       if (planned.has(t.id)) problems.push(`plan lists ${t.id} in more than one shard`)
-      planned.set(t.id, { shard: shard.index, project: t.project, file: t.file })
+      planned.set(t.id, { shard: shard.index, project: t.project, file: t.file, ai: shard.role === "ai" })
     }
   }
   const seen = new Map()
@@ -107,22 +107,23 @@ export function mergeResults({ plan, reports, quarantineIds = new Set() }) {
     }
   }
   const rows = []
-  for (const [id, { shard, project, file }] of planned) {
+  for (const [id, { shard, project, file, ai }] of planned) {
     const got = seen.get(id) ?? []
     const quarantined = quarantineIds.has(id)
+    const tag = ai ? { ai: true } : {}
     if (got.length === 0) {
       problems.push(`planned test has no result: ${id}`)
-      rows.push({ id, shard, project, file, status: "not-run", reason: "no result", quarantined, attempts: 0 })
+      rows.push({ id, shard, project, file, ...tag, status: "not-run", reason: "no result", quarantined, attempts: 0 })
       continue
     }
     if (got.length > 1) {
       problems.push(`duplicate result for ${id} (${got.length} results)`)
-      rows.push({ id, shard, project, file, status: "failed", reason: "duplicate result", quarantined, attempts: 0 })
+      rows.push({ id, shard, project, file, ...tag, status: "failed", reason: "duplicate result", quarantined, attempts: 0 })
       continue
     }
     const { test, titles } = got[0]
     const { status, attempts } = classifyAttempts(test)
-    const base = { id, shard, project, file, titles, attempts, quarantined }
+    const base = { id, shard, project, file, ...tag, titles, attempts, quarantined }
     if (status === "not-run") {
       problems.push(`planned test has no attempt: ${id}`)
       rows.push({ ...base, status: "not-run", reason: "no attempt" })
@@ -139,6 +140,14 @@ export function mergeResults({ plan, reports, quarantineIds = new Set() }) {
     }
   }
   rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  const counts = countRows(rows.filter((r) => !r.ai))
+  const aiRows = rows.filter((r) => r.ai)
+  const aiCounts = aiRows.length ? countRows(aiRows) : null
+  const verdict = problems.length || counts.failed || counts.notRun || aiCounts?.failed || aiCounts?.notRun ? "failed" : "passed"
+  return { verdict, counts, ...(aiCounts ? { aiCounts } : {}), rows, problems, unplanned: [...new Set(unplanned)].sort() }
+}
+
+export function countRows(rows) {
   const counts = { planned: rows.length, passed: 0, failed: 0, flaky: 0, notRun: 0, quarantined: 0 }
   for (const row of rows) {
     if (row.status === "passed") counts.passed += 1
@@ -147,6 +156,5 @@ export function mergeResults({ plan, reports, quarantineIds = new Set() }) {
     else if (row.status === "not-run") counts.notRun += 1
     else if (row.status === "quarantined") counts.quarantined += 1
   }
-  const verdict = problems.length || counts.failed || counts.notRun ? "failed" : "passed"
-  return { verdict, counts, rows, problems, unplanned: [...new Set(unplanned)].sort() }
+  return counts
 }

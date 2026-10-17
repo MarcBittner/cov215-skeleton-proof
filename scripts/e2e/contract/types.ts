@@ -6,6 +6,9 @@ export type TestResult = "passed" | "failed" | "flaky" | "not-run"
 export type RunRequest = { setup_run_id: string; run_key: string }
 export type ReportRequest = { setup_run_id: string }
 
+export type InjectedBreak = "alter-query-field" | "drop-mutation-frame"
+export type GateEntry = { ref: string; path: string; sha256: string; break: InjectedBreak | null }
+
 export type SetupPlanState = "planned" | "dispatched" | "refused" | "failed" | "superseded" | "skipped"
 
 export type SetupPlan = {
@@ -30,7 +33,7 @@ export type SetupPlan = {
     convex_deployment: string
     convex_url: string
   }
-  gate: { ref: string; path: string; sha256: string } | null
+  gate: GateEntry | null
   mail: { contained: boolean; effective_catch_all: string | null }
   tenants: { test_id: string; org_id: string }[]
   dispatches: Dispatch[]
@@ -49,7 +52,7 @@ export type Dispatch = {
 }
 
 export type PlannedTest = { id: string; kind: TestKind; file: string; project: string; predicted_ms: number }
-export type Shard = { run_key: string; index: number; predicted_ms: number; tests: PlannedTest[] }
+export type Shard = { run_key: string; index: number; role?: "ai"; predicted_ms: number; tests: PlannedTest[] }
 
 export type ShardPlan = {
   schema_version: string
@@ -59,7 +62,7 @@ export type ShardPlan = {
   shards: Shard[]
 }
 
-export type TenantMember = { kind: string; user_id: string; convex_user_id: string; email: string; role: string }
+export type TenantMember = { kind: string; user_id: string; convex_user_id?: string; external?: true; email: string; role: string }
 export type BundleTenant = { title: string; org_id: string; org_name: string; recipe: string; members: TenantMember[] }
 
 export type Bundle = {
@@ -125,6 +128,7 @@ export type Control = {
     max_tenants: number
     deadline_at: string
   }
+  persona_windows?: Record<string, { from: number; to: number }[]>
   seeded_escape: { function_id: string; break_sha: string; branch: string; dropped: string[] } | null
 }
 
@@ -144,10 +148,12 @@ export type CommentRows = {
 
 export type FullRunCode =
   | "map-stale"
+  | "map-untrusted"
   | "map-fetch-failed"
   | "diff-mismatch"
   | "manifest-schema-invalid"
   | "schema-unparsed"
+  | "schema-unmapped"
   | "helper-fanout"
   | "selector-error"
   | "server-unexecuted"

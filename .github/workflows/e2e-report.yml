@@ -82,6 +82,18 @@ jobs:
         run: node scripts/e2e/dist/scripts/e2e/report/cli.js report e2e-in/plan e2e-in/shards e2e-in/rows e2e-out/outcome
         env:
           RUN_ID: ${{ steps.trust.outputs.run_id }}
+      - if: always() && steps.trust.outputs.ok == 'true' && hashFiles('e2e-out/outcome/results.json') != ''
+        id: record
+        continue-on-error: true
+        run: node scripts/e2e/dist/scripts/e2e/report/cli.js run-record e2e-in/plan e2e-out/outcome e2e-out/run-record
+        env:
+          RUN_ID: ${{ steps.trust.outputs.run_id }}
+      - if: always() && steps.record.outcome == 'success' && hashFiles('e2e-out/run-record/run-record.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-run-record-${{ matrix.target.setup_run_id }}
+          path: e2e-out/run-record/
+          retention-days: 90
       - if: always() && steps.trust.outputs.ok == 'true' && matrix.target.mode == 'live'
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/report-restore.js e2e-out/outcome
         env:
@@ -93,6 +105,89 @@ jobs:
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
           E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
           E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
+      - if: always() && steps.trust.outputs.ok == 'true'
+        id: map
+        run: node scripts/e2e/dist/scripts/e2e/report/cli.js map-inputs e2e-in/plan e2e-out/map
+        env:
+          RUN_ID: ${{ steps.trust.outputs.run_id }}
+      - if: always() && steps.map.outputs.map == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*
+          path: e2e-in/night
+          run-id: ${{ steps.trust.outputs.run_id }}
+          github-token: ${{ github.token }}
+      - if: always() && steps.map.outputs.map == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-map-plan
+          path: e2e-in/map-plan
+          run-id: ${{ matrix.target.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: always() && steps.map.outputs.map == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-map
+          path: e2e-in/prev-map
+          run-id: ${{ matrix.target.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: always() && steps.map.outputs.map == 'true'
+        id: reduce
+        continue-on-error: true
+        run: |
+          seed="$(jq -r .seedHash e2e-in/night/nightly-static/seed.json)"
+          node scripts/e2e/dist/scripts/e2e/map/nightly/main.js report reduce --in e2e-in/night --out e2e-out/map \
+            --expected e2e-in/map-plan/expected.json --sha "$SHA" --built-at "$BUILT_AT" --seed-hash "$seed" --always-run e2e/always-run.json
+        env:
+          SHA: ${{ steps.map.outputs.sha }}
+          BUILT_AT: ${{ steps.map.outputs.built_at }}
+      - if: always() && steps.map.outputs.map == 'true' && (vars.E2E_DRAFTS_LIVE == '1' || vars.E2E_DRAFTS_LIVE == 'dry')
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-drafts
+          path: e2e-in/drafts
+          run-id: ${{ matrix.target.setup_run_id }}
+          github-token: ${{ github.token }}
+      - if: always() && steps.map.outputs.map == 'true' && (vars.E2E_DRAFTS_LIVE == '1' || vars.E2E_DRAFTS_LIVE == 'dry')
+        id: drafts-state
+        continue-on-error: true
+        run: node scripts/e2e/dist/scripts/e2e/report/cli.js drafts-state e2e-in/drafts
+      - if: always() && steps.map.outputs.map == 'true'
+        id: reports
+        continue-on-error: true
+        run: |
+          if [ -f e2e-in/prev-map/manifest.json ]; then set -- --previous e2e-in/prev-map/manifest.json; fi
+          node scripts/e2e/dist/scripts/e2e/map/nightly/main.js report reports --out e2e-out/map --reduce-dir e2e-out/map/nightly-reduce "$@"
+          if [ "$E2E_DRAFTS_LIVE" != 1 ] && [ "$E2E_DRAFTS_LIVE" != dry ]; then exit 0; fi
+          if [ ! -f e2e-out/map/nightly-reports/reports.json ]; then echo "drafts input not written: no gap report this night"; exit 0; fi
+          node scripts/e2e/dist/scripts/e2e/setup/t5/drafts-input.js write --reports e2e-out/map/nightly-reports/reports.json \
+            --manifest e2e-out/map/nightly-reduce/manifest.json --state e2e-in/drafts/drafts-state.json --built-at "$BUILT_AT" \
+            --out e2e-out/map/nightly-reports/drafts-input.json
+        env:
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
+          BUILT_AT: ${{ steps.map.outputs.built_at }}
+      - if: always() && steps.map.outputs.map == 'true'
+        id: publish
+        run: |
+          node scripts/e2e/dist/scripts/e2e/map/nightly/main.js report publish --sha "$SHA" --built-at "$BUILT_AT" --reduce "$REDUCE" \
+            --run-jobs e2e-out/map/run-jobs.json --reduce-dir e2e-out/map/nightly-reduce --reports-dir e2e-out/map/nightly-reports \
+            --repo "$GITHUB_REPOSITORY" --work-dir e2e-out/map-store --provenance-out e2e-out/map-publish --fold e2e-out/map/setup-nights.json \
+            --runs-dir e2e-out/map/run-records
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.map.outputs.sha }}
+          BUILT_AT: ${{ steps.map.outputs.built_at }}
+          REDUCE: ${{ steps.reduce.outcome }}
+      - if: always() && steps.map.outputs.map == 'true' && hashFiles('e2e-out/map-publish/map-publish.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: map-publish-${{ steps.map.outputs.sha }}
+          path: e2e-out/map-publish/map-publish.json
+          retention-days: 90
       - if: steps.trust.outputs.ok != 'true' && steps.trust.outputs.record == 'true'
         run: node scripts/e2e/dist/scripts/e2e/report/cli.js reject e2e-out/outcome
         env:

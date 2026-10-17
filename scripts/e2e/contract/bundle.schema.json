@@ -39,14 +39,15 @@
     "shard_plan": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 16,
+      "maxItems": 17,
       "items": {
         "type": "object",
         "additionalProperties": false,
         "required": ["run_key", "index", "predicted_ms", "tests"],
         "properties": {
           "run_key": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
-          "index": { "type": "integer", "minimum": 1, "maximum": 16 },
+          "index": { "type": "integer", "minimum": 1, "maximum": 17 },
+          "role": { "const": "ai" },
           "predicted_ms": { "type": "integer", "minimum": 0 },
           "tests": {
             "type": "array",
@@ -69,7 +70,7 @@
     },
     "tenants": {
       "type": "object",
-      "maxProperties": 20,
+      "maxProperties": 128,
       "propertyNames": { "type": "string", "pattern": "^t_[0-9a-f]{24}(#([2-9]|1[0-9]|20))?$" },
       "additionalProperties": {
         "type": "object",
@@ -87,11 +88,12 @@
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["kind", "user_id", "convex_user_id", "email", "role"],
+              "required": ["kind", "user_id", "email", "role"],
               "properties": {
                 "kind": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,40}$" },
                 "user_id": { "$ref": "#/$defs/clerkUserId" },
                 "convex_user_id": { "$ref": "#/$defs/convexId" },
+                "external": { "const": true },
                 "email": { "$ref": "#/$defs/email" },
                 "role": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,40}$" }
               }

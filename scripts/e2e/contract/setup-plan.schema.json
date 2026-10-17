@@ -60,11 +60,12 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["ref", "path", "sha256"],
+          "required": ["ref", "path", "sha256", "break"],
           "properties": {
             "ref": { "type": "string", "pattern": "^(e2e/gate/[A-Za-z0-9._-]{1,64}|artifact:[A-Za-z0-9._-]{1,64})$" },
             "path": { "type": "string", "pattern": "^e2e/[^\\s:|\\\\]+\\.spec\\.ts$", "maxLength": 300 },
-            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "break": { "enum": [null, "alter-query-field", "drop-mutation-frame"] }
           }
         }
       ]
@@ -80,7 +81,7 @@
     },
     "tenants": {
       "type": "array",
-      "maxItems": 20,
+      "maxItems": 128,
       "items": {
         "type": "object",
         "additionalProperties": false,

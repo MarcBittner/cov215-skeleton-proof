@@ -37,8 +37,9 @@ export class TargetRefused extends Error {
     readonly action: string,
     readonly deployment: string,
     readonly reason: string,
+    readonly detail?: string,
   ) {
-    super(`target refused for ${action} on ${deployment || "<none>"}: ${reason}`)
+    super(`target refused for ${action} on ${deployment || "<none>"}: ${reason}${detail ? ` (${detail})` : ""}`)
     this.name = "TargetRefused"
   }
 }

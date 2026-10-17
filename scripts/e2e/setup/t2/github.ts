@@ -2,7 +2,7 @@ import { validateRunRequest } from "../../contract/formats.js"
 import { markerMessage, type GitCommit } from "../../map/nightly/branch.js"
 import type { Deployment, DeploymentStatus, DeploymentsClient } from "../../map/nightly/ready.js"
 import { emptyIndex, parseIndex, type StoreIndex } from "../../map/nightly/store-index.js"
-import type { IndexStore } from "../../map/nightly/setup-night.js"
+import type { IndexReader } from "../../map/nightly/setup-night.js"
 import { assertRunBranch, type BranchRef, type GitRefs } from "./branches.js"
 
 export type Fetch = (url: string, init?: RequestInit) => Promise<Response>
@@ -10,7 +10,7 @@ export type Fetch = (url: string, init?: RequestInit) => Promise<Response>
 export const RUN_WORKFLOW = "e2e-run.yml"
 export const SETUP_WORKFLOW = "e2e-setup.yml"
 export const DISPATCH_API_VERSION = "2026-03-10"
-export const SETUP_DISPATCH_INPUTS = ["mode", "kind", "pr"] as const
+export const SETUP_DISPATCH_INPUTS = ["mode", "kind", "pr", "gate_ref", "gate_sha256", "gate_break"] as const
 export const MAP_STORE_BRANCH = "e2e/map"
 export const MAP_INDEX_PATH = "maps/index.json"
 
@@ -73,7 +73,6 @@ export interface SetupGitHub extends GitRefs, DeploymentsClient {
   compareFiles(base: string, head: string): Promise<{ files: string[]; complete: boolean }>
   downloadArtifact(artifactId: number): Promise<Buffer>
   readContent(path: string, ref: string): Promise<{ text: string; sha: string } | null>
-  writeContent(path: string, branch: string, text: string, message: string, sha: string | null): Promise<void>
 }
 
 export class GitHubHttpError extends Error {
@@ -280,28 +279,14 @@ export function createSetupGitHub(opts: { repo: string; token: string; fetch?: F
       if (body.encoding !== "base64" || typeof body.content !== "string" || !body.sha) throw new Error(`unexpected content for ${path}`)
       return { text: Buffer.from(body.content, "base64").toString("utf8"), sha: body.sha }
     },
-    async writeContent(path, branch, text, message, sha) {
-      if (branch !== MAP_STORE_BRANCH || path !== MAP_INDEX_PATH) {
-        throw new Error(`refused: setup writes only ${MAP_INDEX_PATH} on ${MAP_STORE_BRANCH}`)
-      }
-      const p = `contents/${path.split("/").map(encodeURIComponent).join("/")}`
-      const body: Record<string, string> = { message, branch, content: Buffer.from(text, "utf8").toString("base64") }
-      if (sha) body.sha = sha
-      await expectOk(await call("PUT", p, body), p)
-    },
   }
 }
 
-export function mapIndexStore(gh: Pick<SetupGitHub, "readContent" | "writeContent">): IndexStore {
-  let lastSha: string | null = null
+export function mapIndexStore(gh: Pick<SetupGitHub, "readContent">): IndexReader {
   return {
     async readIndex(): Promise<StoreIndex> {
       const doc = await gh.readContent(MAP_INDEX_PATH, MAP_STORE_BRANCH)
-      lastSha = doc?.sha ?? null
       return doc ? parseIndex(JSON.parse(doc.text)) : emptyIndex()
-    },
-    async writeIndex(index, message) {
-      await gh.writeContent(MAP_INDEX_PATH, MAP_STORE_BRANCH, JSON.stringify(index, null, 2) + "\n", message, lastSha)
     },
   }
 }

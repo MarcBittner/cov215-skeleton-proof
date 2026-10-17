@@ -38,7 +38,8 @@ from `scripts/e2e/contract` (index). Valid fixtures for every format: `__tests__
   `screen` or `snapshot`. `run.json`, `plan.json`, the bundle, shard reports and the report use only that form; a selection may name
   the bare gen id, which setup maps to it.
 - **run.json.** `run_tag` = `r<setup_run_id>`. `gate` is set exactly when `kind` is `gate` (`ref` = `e2e/gate/<id>` or
-  `artifact:<name>`, plus `path` and `sha256` of the drafted spec). Up to two dispatches, `main` with `e2e-bundle` and `ai` with
+  `artifact:<name>`, plus `path` and `sha256` of the drafted spec, and `break`: the injected break the gate run applies, one of
+  `INJECTED_BREAKS`, or `null` for a clean run). Up to two dispatches, `main` with `e2e-bundle` and `ai` with
   `e2e-bundle-ai`, each with its own `run_key`; report matches a run only through `dispatched_run_id` recorded here.
   `state` `dispatched` needs a sent `main` dispatch and, unless `fixture`, `mail.contained`. `refused`, `failed`, `superseded`
   and `skipped` carry a `reason` and no sent dispatch. `supersedes` lists only older setup runs.
@@ -50,8 +51,8 @@ from `scripts/e2e/contract` (index). Valid fixtures for every format: `__tests__
   or Linear key, a private key or the Vercel bypass header rejects the bundle; there is no field for a bypass.
 - **Envelope.** RSA-OAEP with SHA-256 (key ≥ 2048 bits) wraps a random 32-byte key; AES-256-GCM (12-byte iv, 16-byte tag) encrypts
   the canonical bundle JSON. Additional data = `cov215-e2e-bundle/1|<setup_run_id>|<run_key>|<sha>`, so the clear header cannot
-  be swapped. `key_id` = sha256 of the recipient's SPKI DER. `openBundle(env, key, {sha: github.sha})` refuses a wrong sha before
-  decrypting.
+  be swapped. `key_id` = sha256 of the recipient's SPKI DER. `openBundle(env, key, {sha, setup_run_id, run_key})` requires all three
+  (the job's commit and its dispatch inputs) and refuses a mismatch before decrypting.
 - **control.json.** The mail projection is exactly `{emailEnabled, catchAllAddress, catchAllSource}`; a contained deployment never
   had `emailEnabled: true` (R6); adoption is only from an older setup run.
 - **selection.json.** Canonical JSON, every array sorted. A `fullRun` reason (`<code>` or `<code>: <detail>`) carries no tests and

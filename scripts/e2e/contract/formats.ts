@@ -52,14 +52,17 @@ function exactTestIds(ids: string[], at: string): string[] {
 
 function shardErrors(shards: Shard[], at: string): string[] {
   const errors: string[] = []
-  const byKey = new Map<string, number[]>()
-  for (const s of shards) byKey.set(s.run_key, [...(byKey.get(s.run_key) ?? []), s.index])
-  for (const [key, indexes] of byKey) {
-    if (indexes.length > 16) errors.push(`${at}: run_key ${key} has more than 16 shards`)
-    const sorted = [...indexes].sort((a, b) => a - b)
+  const byKey = new Map<string, Shard[]>()
+  for (const s of shards) byKey.set(s.run_key, [...(byKey.get(s.run_key) ?? []), s])
+  for (const [key, group] of byKey) {
+    const ai = group.filter((s) => s.role === "ai")
+    if (group.length - ai.length > 16) errors.push(`${at}: run_key ${key} has more than 16 shards`)
+    if (ai.length > 1) errors.push(`${at}: run_key ${key} has more than one ai shard`)
+    const sorted = group.map((s) => s.index).sort((a, b) => a - b)
     sorted.forEach((n, i) => {
       if (n !== i + 1) errors.push(`${at}: run_key ${key} shard indexes must be 1..${sorted.length} without gaps`)
     })
+    if (ai.length === 1 && ai[0].index !== sorted.length) errors.push(`${at}: run_key ${key} ai shard must be the last shard`)
   }
   const seen = new Set<string>()
   shards.forEach((s, si) =>
@@ -240,6 +243,9 @@ export function validateBundle(value: unknown): ValidationResult<Bundle> {
       if (new Set(kinds).size !== kinds.length) errors.push(`/tenants/${key}/members: a kind is listed twice`)
       for (const m of tenant.members) {
         if (b.users[m.user_id] !== m.email) errors.push(`/users/${m.user_id}: must map to member ${m.email}`)
+        if (m.external ? m.convex_user_id !== undefined || m.kind === "owner" : m.convex_user_id === undefined) {
+          errors.push(`/tenants/${key}/members/${m.kind}: an internal member needs convex_user_id; an external one (never the owner) has none`)
+        }
       }
     }
     const ttl = (Date.parse(b.expires_at) - Date.parse(b.issued_at)) / 1000

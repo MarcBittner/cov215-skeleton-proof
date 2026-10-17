@@ -4,6 +4,8 @@
   "devDependencies": {
     "typescript": "5.9.3",
     "@types/node": "20.19.33",
-    "jszip": "3.10.1"
+    "jszip": "3.10.1",
+    "convex": "1.42.3",
+    "@anthropic-ai/sdk": "0.131.0"
   }
 }

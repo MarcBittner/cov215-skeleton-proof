@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url"
 
 import { CONTRACT_VERSION, FILES, newRunKey, runTagFor } from "../contract/constants.js"
 import { validateRunRequest, validateSetupPlan, validateShardPlan } from "../contract/formats.js"
-import type { RunKind, SetupPlan } from "../contract/types.js"
+import type { GateEntry, RunKind, SetupPlan } from "../contract/types.js"
 import { type GitHub, env, gitHubClient, output, readJsonFile, summary } from "../lib/github.js"
 import { planShards, planSummary, shardPlanDoc } from "../plan-shards.mjs"
 import { catalogueFromList } from "../report/id.mjs"
@@ -17,6 +17,7 @@ import { READY_TIMEOUT_MS, readPreview, type PullRequestTargetEvent } from "./t2
 import { createSetupGitHub } from "./t2/github.js"
 import { resolvePullRequestTarget } from "./t2/resolve-target.js"
 import { editsBuildRules, skipsBuild } from "./t2/skip.js"
+import { parseGateInputs } from "./t2/gate.js"
 import type { SetupStepContext, SetupTask } from "./t2/step.js"
 import { runSetupStep as t3 } from "./t3/index.js"
 import { runSetupStep as t4 } from "./t4/index.js"
@@ -89,7 +90,7 @@ export function fixtureRunJson(args: {
     base_sha: null,
     branch,
     deployment: FIXTURE_DEPLOYMENT,
-    gate: kind === "gate" ? { ref: "artifact:fixture-gate", path: "e2e/fixture/gate.spec.ts", sha256: createHash("sha256").update("fixture").digest("hex") } : null,
+    gate: kind === "gate" ? { ref: "artifact:fixture-gate", path: "e2e/fixture/gate.spec.ts", sha256: createHash("sha256").update("fixture").digest("hex"), break: null } : null,
     mail: { contained: false, effective_catch_all: null },
     tenants: [],
     dispatches: [{ run_key: runKey, role: "main", bundle_artifact: "e2e-bundle", ref: branch, dispatched_run_id: null, dispatched_at: null }],
@@ -148,6 +149,7 @@ export async function dispatchRun(gh: GitHub, planDir: string, now: () => Date =
 export type PrTarget = { ready: string } | { fallback: string } | { refused: string }
 
 export interface ResolveClients {
+  branchHead(ref: string): Promise<string | null>
   pull(pr: number): Promise<{ headSha: string; headRepo: string | null; baseRepo: string } | null>
   prTarget(pr: number): Promise<PrTarget>
   baseConvex(sha: string): Promise<string | null>
@@ -160,7 +162,17 @@ export interface LiveResolution {
   deployment: string
 }
 
-export async function resolveLive(a: { kind: RunKind; pr: number | null; setupRunId: string; repo: string; sha: string }, clients: () => ResolveClients): Promise<LiveResolution> {
+export async function resolveLive(
+  a: { kind: RunKind; pr: number | null; setupRunId: string; repo: string; sha: string; gate?: { gate: GateEntry | null; refused: string | null } },
+  clients: () => ResolveClients,
+): Promise<LiveResolution> {
+  if (a.gate?.refused) return { refused: a.gate.refused, headSha: a.sha, deployment: `${a.kind}-${a.setupRunId}` }
+  if (a.kind === "gate") {
+    if (!a.gate?.gate) return { refused: "a gate run needs gate_ref, gate_sha256 and gate_break", headSha: a.sha, deployment: `gate-${a.setupRunId}` }
+    const head = await clients().branchHead(a.gate.gate.ref)
+    if (!head) return { refused: `${a.gate.gate.ref} does not exist`, headSha: a.sha, deployment: `gate-${a.setupRunId}` }
+    return { refused: null, headSha: head, deployment: `gate-${a.setupRunId}` }
+  }
   if (a.pr === null) return { refused: null, headSha: a.sha, deployment: `${a.kind}-${a.setupRunId}` }
   if (!a.repo) throw new Error("GITHUB_REPOSITORY is not set")
   const c = clients()
@@ -188,6 +200,9 @@ export function resolveClients(gh: GitHub, token: string, opts: { setupRunId: st
     return res.text()
   }
   return {
+    async branchHead(ref) {
+      return (await setup.getBranch(ref))?.sha ?? null
+    },
     async pull(pr) {
       const p = await gh.get<{ head: { sha: string; repo: { full_name: string } | null }; base: { repo: { full_name: string } } }>(`/pulls/${pr}`)
       return p ? { headSha: p.head.sha, headRepo: p.head.repo?.full_name ?? null, baseRepo: p.base.repo.full_name } : null
@@ -246,9 +261,10 @@ export async function main(argv: string[], source: Record<string, string | undef
       const pr = payload.pull_request?.number ?? null
       const setupRunId = env("GITHUB_RUN_ID", source)
       const gated = inputs.mode === "live" && source.LIVE_SETUP === "true"
+      const gate = parseGateInputs(inputs.kind, source)
       const live = gated
         ? await resolveLive(
-            { kind: inputs.kind, pr: pr ?? inputPr, setupRunId, repo: source.GITHUB_REPOSITORY ?? "", sha: env("GITHUB_SHA", source) },
+            { kind: inputs.kind, pr: pr ?? inputPr, setupRunId, repo: source.GITHUB_REPOSITORY ?? "", sha: env("GITHUB_SHA", source), gate },
             () =>
               deps.resolve ??
               resolveClients(client(), env("GH_TOKEN", source), { setupRunId, stagingDir: process.cwd(), readyBoundMs: Number(source.E2E_READY_BOUND_MS ?? READY_TIMEOUT_MS) }),
@@ -265,6 +281,7 @@ export async function main(argv: string[], source: Record<string, string | undef
           live: String(gated && !live?.refused),
           refused: live?.refused ?? "",
           head_sha: live?.headSha ?? env("GITHUB_SHA", source),
+          gate_spec: live && !live.refused && gate.gate ? gate.gate.path : "",
         },
         source,
       )

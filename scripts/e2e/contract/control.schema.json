@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://co-ver.com/schemas/e2e/control.schema.json",
   "title": "control.json: the setup run's control record",
-  "description": "Written by e2e-setup.yml prepare into artifact e2e-control; read only by e2e-report.yml and setup's own later passes. Holds the mail field projection (R6, never a raw row, never a key), the run's created users and tenants, the seed-integrity baseline, the limiter budget, and the C11 seeded-escape control (R36, R61). Never put in the bundle.",
+  "description": "Written by e2e-setup.yml prepare into artifact e2e-control; read only by e2e-report.yml and setup's own later passes. Holds the mail field projection (R6, never a raw row, never a key), the run's created users and tenants, the seed-integrity baseline, the limiter budget, the registry persona ticket windows (epoch ms, read by other runs' sweeps), and the C11 seeded-escape control (R36, R61). Never put in the bundle.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "setup_run_id", "run_tag", "convex_deployment", "mail", "seed_integrity", "created", "limiter", "seeded_escape"],
@@ -80,7 +80,7 @@
         },
         "tenants": {
           "type": "array",
-          "maxItems": 20,
+          "maxItems": 128,
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -103,8 +103,26 @@
         "ticket_mints_per_s": { "type": "number", "minimum": 0 },
         "max_users": { "type": "integer", "minimum": 0, "maximum": 200 },
         "max_tickets_per_min": { "type": "integer", "minimum": 0, "maximum": 60 },
-        "max_tenants": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "max_tenants": { "type": "integer", "minimum": 0, "maximum": 128 },
         "deadline_at": { "$ref": "#/$defs/datetime" }
+      }
+    },
+    "persona_windows": {
+      "type": "object",
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^user_[A-Za-z0-9]{1,64}$" },
+      "additionalProperties": {
+        "type": "array",
+        "maxItems": 1000,
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "to"],
+          "properties": {
+            "from": { "type": "integer", "minimum": 0 },
+            "to": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     },
     "seeded_escape": {

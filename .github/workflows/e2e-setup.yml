@@ -25,6 +25,19 @@ on:
         type: choice
         options: [pass, fail, drop, no-fan-in]
         default: pass
+      gate_ref:
+        type: string
+        required: false
+        description: Gate runs only. The e2e/gate/<id>-<n> branch holding the drafted spec.
+      gate_sha256:
+        type: string
+        required: false
+        description: Gate runs only. sha256 of the drafted spec the gate is bound to.
+      gate_break:
+        type: choice
+        options: [none, alter-query-field, drop-mutation-frame]
+        default: none
+        description: Gate runs only. The injected break this gate run applies.
 
 permissions: {}
 
@@ -45,6 +58,7 @@ jobs:
       live: ${{ steps.resolve.outputs.live }}
       refused: ${{ steps.resolve.outputs.refused }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
+      gate_spec: ${{ steps.resolve.outputs.gate_spec }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
@@ -58,6 +72,10 @@ jobs:
           INPUT_PR: ${{ inputs.pr }}
           INPUT_FIXTURE_CASE: ${{ inputs.fixture_case }}
           LIVE_SETUP: ${{ vars.E2E_LIVE_SETUP }}
+          INPUT_GATE_REF: ${{ inputs.gate_ref }}
+          INPUT_GATE_SHA256: ${{ inputs.gate_sha256 }}
+          INPUT_GATE_BREAK: ${{ inputs.gate_break }}
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
 
   list:
     needs: resolve
@@ -87,6 +105,7 @@ jobs:
           PR: ${{ needs.resolve.outputs.pr }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           E2E_STAGE_DIR: e2e-out/stage
+          E2E_GATE_SPEC: ${{ needs.resolve.outputs.gate_spec }}
       - if: always() && steps.list.outputs.refused != '' && hashFiles('e2e-out/stage/e2e-head/**') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -154,9 +173,13 @@ jobs:
         id: contain
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js contain
         env:
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          INPUT_GATE_REF: ${{ inputs.gate_ref }}
+          INPUT_GATE_SHA256: ${{ inputs.gate_sha256 }}
+          INPUT_GATE_BREAK: ${{ inputs.gate_break }}
           CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
           E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
           LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
@@ -164,7 +187,6 @@ jobs:
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
           E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
-          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
           E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
           E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
@@ -194,14 +216,24 @@ jobs:
           path: e2e-out/stage/e2e-plan/
           retention-days: 90
           overwrite: true
+      - if: steps.contain.outputs.contained == 'true' && needs.resolve.outputs.kind == 'nightly' && (vars.E2E_DRAFTS_LIVE == '1' || vars.E2E_DRAFTS_LIVE == 'dry')
+        id: drafts-input
+        run: node scripts/e2e/dist/scripts/e2e/setup/t5/drafts-input.js fetch e2e-out/work
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - if: steps.contain.outputs.contained == 'true'
         id: live
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js prepare
         env:
           ANTHROPIC_API_KEY: ${{ secrets.E2E_ANTHROPIC_API_KEY }}
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
+          E2E_SELECT_MODE: ${{ vars.E2E_SELECT_MODE }}
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          INPUT_GATE_REF: ${{ inputs.gate_ref }}
+          INPUT_GATE_SHA256: ${{ inputs.gate_sha256 }}
+          INPUT_GATE_BREAK: ${{ inputs.gate_break }}
           CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
           E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
           LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
@@ -209,7 +241,6 @@ jobs:
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
           E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
-          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
           E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
           E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
@@ -245,6 +276,18 @@ jobs:
           path: e2e-out/stage/e2e-head/
           retention-days: 90
           overwrite: true
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/work/map/manifest.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-map
+          path: e2e-out/work/map/
+          retention-days: 1
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-map-plan/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-map-plan
+          path: e2e-out/stage/e2e-map-plan/
+          retention-days: 90
       - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-comment-rows-t3/**') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -263,13 +306,39 @@ jobs:
           name: e2e-comment-rows-t5
           path: e2e-out/stage/e2e-comment-rows-t5/
           retention-days: 90
+      - if: steps.live.outcome == 'success' && needs.resolve.outputs.kind == 'nightly' && vars.E2E_DRAFTS_LIVE == '1' && hashFiles('e2e-out/work/gate-requests.json') != ''
+        id: gates
+        run: node scripts/e2e/dist/scripts/e2e/setup/t5/dispatch-gates.js e2e-out/work/gate-requests.json
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
+      - if: always() && hashFiles('e2e-out/work/drafts-state.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-drafts
+          path: |
+            e2e-out/work/drafts-state.json
+            e2e-out/work/drafts-report.json
+            e2e-out/work/gate-requests.json
+            e2e-out/work/dry-drafts/
+          retention-days: 30
+      - if: always() && steps.live.outcome != 'skipped' && hashFiles('e2e-out/stage/e2e-select-ai/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-select-ai
+          path: e2e-out/stage/e2e-select-ai/
+          retention-days: 90
       - if: steps.live.outputs.dispatch == 'true'
         id: dispatch
         run: node scripts/e2e/dist/scripts/e2e/setup/t2/live-env.js dispatch
         env:
+          E2E_DRAFTS_LIVE: ${{ vars.E2E_DRAFTS_LIVE }}
           GITHUB_TOKEN: ${{ github.token }}
           INPUT_KIND: ${{ needs.resolve.outputs.kind }}
           INPUT_PR: ${{ needs.resolve.outputs.pr }}
+          INPUT_GATE_REF: ${{ inputs.gate_ref }}
+          INPUT_GATE_SHA256: ${{ inputs.gate_sha256 }}
+          INPUT_GATE_BREAK: ${{ inputs.gate_break }}
           CLERK_SECRET_KEY: ${{ secrets.E2E_CLERK_SECRET_KEY }}
           E2E_CONVEX_PREVIEW_DEPLOY_KEY: ${{ secrets.E2E_CONVEX_PREVIEW_DEPLOY_KEY }}
           LINEAR_API_KEY: ${{ secrets.E2E_LINEAR_API_KEY }}
@@ -277,7 +346,6 @@ jobs:
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
           E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
-          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
           E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
           E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}
@@ -327,7 +395,6 @@ jobs:
           E2E_SETUP_ADMIN_USER_ID: ${{ vars.E2E_SETUP_ADMIN_USER_ID }}
           E2E_STAFF_USER_IDS: ${{ vars.E2E_STAFF_USER_IDS }}
           E2E_TICKET_AGE_RECIPIENT: ${{ vars.E2E_TICKET_AGE_RECIPIENT }}
-          E2E_RECIPES_FILE: ${{ vars.E2E_RECIPES_FILE }}
           E2E_RUNNER_SLOTS: ${{ vars.E2E_RUNNER_SLOTS }}
           E2E_S5_RESULT: ${{ vars.E2E_S5_RESULT }}
           E2E_SHARD_OVERHEAD_MS: ${{ vars.E2E_SHARD_OVERHEAD_MS }}

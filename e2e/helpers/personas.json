@@ -1,0 +1,20 @@
+{
+  "personas": [
+    { "key": "co-ver-admin", "email": "demo-admin@co-ver.com", "org": "co-ver-internal", "role": "owner", "isCOVerAdmin": true },
+    {
+      "key": "estimator",
+      "email": "demo-estimator@co-ver.com",
+      "org": "co-ver-internal",
+      "role": "assistant",
+      "isEstimator": true,
+      "entry": "/co-verifier-portal",
+      "landing": "/co-verification"
+    },
+    { "key": "stakeholder-approver", "email": "demo-stakeholder@co-ver.com", "org": "demo-stakeholder", "role": "owner" },
+    { "key": "stakeholder-viewer", "email": "demo-stakeholder-viewer@co-ver.com", "org": "demo-stakeholder", "role": "owner" },
+    { "key": "qa-construction-manager", "email": "qa1645-construction-manager@co-ver.com", "org": "demo-dev", "role": "construction_manager" },
+    { "key": "qa-billing-contact", "email": "qa1645-billing-contact@co-ver.com", "org": "demo-dev", "role": "billing_contact" },
+    { "key": "qa-account-admin", "email": "qa1645-account-admin@co-ver.com", "org": "demo-dev", "role": "account_admin" },
+    { "key": "qa-assistant", "email": "qa1645-assistant@co-ver.com", "org": "demo-dev", "role": "assistant" }
+  ]
+}

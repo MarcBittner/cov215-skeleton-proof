@@ -20,7 +20,7 @@ export interface FixtureJson {
 }
 
 export type InputsCheck =
-  | { ok: true; shards: number[]; fanIn: boolean; live: boolean; bundleSha: string; baseUrl: string }
+  | { ok: true; shards: number[]; fanIn: boolean; live: boolean; bundleSha: string; baseUrl: string; kind: SetupPlan["kind"]; convexUrl: string }
   | { ok: false; reason: string }
 
 export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: string; run: unknown; plan: unknown; fixture: FixtureJson | null }): InputsCheck {
@@ -41,7 +41,7 @@ export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: 
   if (!run.fixture && !run.mail.contained) return { ok: false, reason: "a live run whose mail is not contained is not run" }
   const shards = plan.shards.filter((s) => s.run_key === args.runKey).map((s) => s.index)
   if (!shards.length) return { ok: false, reason: "plan has no shards for this run_key" }
-  return { ok: true, shards, fanIn: args.fixture ? args.fixture.fan_in : true, live: !run.fixture, bundleSha: run.pr_sha, baseUrl: run.deployment.url }
+  return { ok: true, shards, fanIn: args.fixture ? args.fixture.fan_in : true, live: !run.fixture, bundleSha: run.pr_sha, baseUrl: run.deployment.url, kind: run.kind, convexUrl: run.deployment.convex_url }
 }
 
 export function shardTestList(plan: ShardPlan, runKey: string, index: number): string[] {
@@ -120,7 +120,7 @@ export async function main(argv: string[]) {
   if (cmd === "inputs") {
     appendFileSync(
       env("GITHUB_OUTPUT"),
-      `shards=${JSON.stringify(check.shards)}\nfan_in=${check.fanIn}\nlive=${check.live}\nbundle_sha=${check.bundleSha}\nbase_url=${check.baseUrl}\n`,
+      `shards=${JSON.stringify(check.shards)}\nfan_in=${check.fanIn}\nlive=${check.live}\nbundle_sha=${check.bundleSha}\nbase_url=${check.baseUrl}\nkind=${check.kind}\nconvex_url=${check.convexUrl}\n`,
     )
     return
   }
