@@ -15,11 +15,15 @@ on:
       kind:
         type: choice
         options: [pr, postmerge, nightly, gate, mut, fallback, fresh, base]
-        default: pr
+        default: base
       fixture_case:
         type: choice
         options: [pass, fail, drop, no-fan-in]
         default: pass
+      fixture_pr:
+        type: string
+        required: false
+        description: Fixture mode only; a pull request in this repository that the report comments on.
 
 permissions: {}
 
@@ -29,58 +33,76 @@ jobs:
       github.event_name != 'pull_request_target' ||
       (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions: {contents: read}
     outputs:
       mode: ${{ steps.resolve.outputs.mode }}
       kind: ${{ steps.resolve.outputs.kind }}
       fixture_case: ${{ steps.resolve.outputs.fixture_case }}
+      fixture_pr: ${{ steps.resolve.outputs.fixture_pr }}
       deployment: ${{ steps.resolve.outputs.deployment }}
+      live: ${{ steps.resolve.outputs.live }}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
+      - uses: ./.github/actions/e2e-dist
       - id: resolve
-        run: node scripts/e2e/setup/t2/skeleton.ts resolve
+        run: node scripts/e2e/dist/scripts/e2e/setup/entry.js resolve
         env:
           INPUT_MODE: ${{ inputs.mode }}
           INPUT_KIND: ${{ inputs.kind }}
           INPUT_FIXTURE_CASE: ${{ inputs.fixture_case }}
+          INPUT_FIXTURE_PR: ${{ inputs.fixture_pr }}
+          LIVE_SETUP: ${{ vars.E2E_LIVE_SETUP }}
 
   prepare:
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ needs.resolve.outputs.mode == 'live' && 'e2e-setup' || '' }}
+    environment: ${{ needs.resolve.outputs.live == 'true' && 'e2e-setup' || '' }}
     concurrency:
       group: convex-${{ needs.resolve.outputs.deployment }}
       cancel-in-progress: false
-    permissions: {actions: write, contents: read}
+    permissions: {actions: write, contents: write, deployments: read, pull-requests: write}
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
+      - uses: ./.github/actions/e2e-dist
       - id: prepare
-        run: node scripts/e2e/setup/t2/skeleton.ts prepare e2e-out/plan
+        run: node scripts/e2e/dist/scripts/e2e/setup/entry.js prepare e2e-out/plan
         env:
+          GH_TOKEN: ${{ github.token }}
           MODE: ${{ needs.resolve.outputs.mode }}
           KIND: ${{ needs.resolve.outputs.kind }}
           FIXTURE_CASE: ${{ needs.resolve.outputs.fixture_case }}
+          FIXTURE_PR: ${{ needs.resolve.outputs.fixture_pr }}
+          LIVE: ${{ needs.resolve.outputs.live }}
       - if: steps.prepare.outputs.dispatch == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-plan
           path: e2e-out/plan/
           retention-days: 90
+      - if: steps.prepare.outputs.dispatch == 'true' && hashFiles('e2e-out/bundle/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-bundle
+          path: e2e-out/bundle/
+          retention-days: 1
+      - if: steps.prepare.outputs.dispatch == 'true' && hashFiles('e2e-out/control/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-control
+          path: e2e-out/control/
+          retention-days: 90
       - if: steps.prepare.outputs.dispatch == 'true'
-        run: node scripts/e2e/setup/t2/skeleton.ts dispatch e2e-out/plan e2e-out/dispatch
+        run: node scripts/e2e/dist/scripts/e2e/setup/entry.js dispatch e2e-out/plan
         env:
           GH_TOKEN: ${{ github.token }}
       - if: steps.prepare.outputs.dispatch == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-dispatch
-          path: e2e-out/dispatch/
+          name: e2e-plan
+          path: e2e-out/plan/
           retention-days: 90
+          overwrite: true

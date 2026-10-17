@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://co-ver.com/schemas/e2e/bundle-envelope.schema.json",
+  "title": "Encrypted inputs bundle (bundle.enc.json in artifact e2e-bundle)",
+  "description": "Hybrid encryption (R93): a random 32-byte AES-256-GCM key encrypts the canonical bundle JSON; the key is wrapped with RSA-OAEP (SHA-256) under the public half of the ticket key. setup_run_id, run_key and sha are clear for the pre-decrypt sha check and are bound into the GCM additional data.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format", "version", "alg", "key_id", "setup_run_id", "run_key", "sha", "wrapped_key", "iv", "tag", "ciphertext"],
+  "properties": {
+    "format": { "const": "cov215-e2e-bundle" },
+    "version": { "const": 1 },
+    "alg": { "const": "RSA-OAEP-256+A256GCM" },
+    "key_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "setup_run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "run_key": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "wrapped_key": { "type": "string", "pattern": "^[A-Za-z0-9+/]{340,1400}={0,2}$" },
+    "iv": { "type": "string", "pattern": "^[A-Za-z0-9+/]{16}$" },
+    "tag": { "type": "string", "pattern": "^[A-Za-z0-9+/]{22}==$" },
+    "ciphertext": { "type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$", "maxLength": 50000000 }
+  }
+}

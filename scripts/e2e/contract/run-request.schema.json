@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://co-ver.com/schemas/e2e/run-request.schema.json",
+  "title": "e2e-run.yml workflow_dispatch inputs",
+  "description": "Exactly the two inputs setup sends when it dispatches e2e-run.yml (R84). Everything else travels in setup's run.json and the encrypted bundle.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["setup_run_id", "run_key"],
+  "properties": {
+    "setup_run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "run_key": { "type": "string", "pattern": "^[0-9a-f]{32}$" }
+  }
+}

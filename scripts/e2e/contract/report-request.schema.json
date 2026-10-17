@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://co-ver.com/schemas/e2e/report-request.schema.json",
+  "title": "e2e-report.yml workflow_dispatch inputs",
+  "description": "The single input the e2e-run.yml fan-in job sends when it dispatches e2e-report.yml at staging (R91).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["setup_run_id"],
+  "properties": {
+    "setup_run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" }
+  }
+}

@@ -1,46 +1,95 @@
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
-interface RunJson {
-  run_id: string
-  run_key: string
-  mode: "fixture" | "live"
-  fixture_case: "pass" | "fail" | "drop" | "no-fan-in" | null
+import { FILES } from "../contract/constants.js"
+import { validateSetupPlan, validateShardPlan } from "../contract/formats.js"
+import type { PlannedTest, SetupPlan, ShardPlan } from "../contract/types.js"
+import { readJsonFile } from "../lib/github.js"
+import { SEP, TEST_DIR } from "../report/id.mjs"
+
+export const FIXTURE_FILE = "fixture.json"
+export const FIXTURE_SCREENSHOT = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+  "base64",
+)
+
+export interface FixtureJson {
+  case: "pass" | "fail" | "drop" | "no-fan-in"
   fan_in: boolean
-  pr_sha: string
-}
-
-interface PlanJson {
-  shards: { index: number; tests: string[] }[]
-}
-
-interface TestResult {
-  id: string
-  status: "passed" | "failed" | "skipped"
 }
 
 export type InputsCheck = { ok: true; shards: number[]; fanIn: boolean } | { ok: false; reason: string }
 
-export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: string; run: RunJson; plan: PlanJson }): InputsCheck {
-  const { setupRunId, runKey, sha, run, plan } = args
-  if (run.run_id !== setupRunId) return { ok: false, reason: `plan belongs to setup run ${run.run_id}, not ${setupRunId}` }
-  if (!run.run_key || run.run_key !== runKey) return { ok: false, reason: "run_key does not match the setup plan" }
-  if (run.pr_sha !== sha) return { ok: false, reason: `planned sha ${run.pr_sha} is not this run's sha ${sha}` }
-  if (run.mode !== "fixture") return { ok: false, reason: "live runs are not built yet" }
-  if (!plan.shards.length) return { ok: false, reason: "plan has no shards" }
-  return { ok: true, shards: plan.shards.map((s) => s.index), fanIn: run.fan_in }
+export function checkRunInputs(args: { setupRunId: string; runKey: string; sha: string; run: unknown; plan: unknown; fixture: FixtureJson | null }): InputsCheck {
+  const runResult = validateSetupPlan(args.run)
+  if (!runResult.ok) return { ok: false, reason: `run.json is invalid: ${runResult.errors[0]}` }
+  const planResult = validateShardPlan(args.plan)
+  if (!planResult.ok) return { ok: false, reason: `plan.json is invalid: ${planResult.errors[0]}` }
+  const run = runResult.value
+  const plan = planResult.value
+  if (run.setup_run_id !== args.setupRunId) return { ok: false, reason: `plan belongs to setup run ${run.setup_run_id}, not ${args.setupRunId}` }
+  if (plan.setup_run_id !== args.setupRunId) return { ok: false, reason: `plan.json belongs to setup run ${plan.setup_run_id}` }
+  if (!run.dispatches.some((d) => d.run_key === args.runKey)) return { ok: false, reason: "run_key does not match the setup plan" }
+  if (run.pr_sha !== args.sha) return { ok: false, reason: `planned sha ${run.pr_sha} is not this run's sha ${args.sha}` }
+  if (!run.fixture) return { ok: false, reason: "live runs are not built yet" }
+  if (!args.fixture) return { ok: false, reason: "a fixture run has no fixture.json" }
+  const shards = plan.shards.filter((s) => s.run_key === args.runKey).map((s) => s.index)
+  if (!shards.length) return { ok: false, reason: "plan has no shards for this run_key" }
+  return { ok: true, shards, fanIn: args.fixture.fan_in }
 }
 
-export function fixtureShardResults(run: RunJson, plan: PlanJson, index: number): TestResult[] {
-  const shard = plan.shards.find((s) => s.index === index)
+function where(test: PlannedTest) {
+  const sep = test.id.indexOf("::")
+  return { file: test.file.slice(`${TEST_DIR}/`.length), titles: test.id.slice(sep + 2).split(SEP) }
+}
+
+type Spec = { title: string; file: string; line: number; column: number; tests: unknown[] }
+type Suite = { title: string; file: string; specs: Spec[]; suites: Suite[] }
+
+export function fixtureShardReport(run: SetupPlan, plan: ShardPlan, fixture: FixtureJson, index: number, runKey: string) {
+  const shards = plan.shards.filter((s) => s.run_key === runKey)
+  const shard = shards.find((s) => s.index === index)
   if (!shard) throw new Error(`shard ${index} is not in the plan`)
-  const last = plan.shards[plan.shards.length - 1]
-  const tests = run.fixture_case === "drop" && shard.index === last.index ? shard.tests.slice(0, -1) : shard.tests
-  return tests.map((id, i) => ({
-    id,
-    status: run.fixture_case === "fail" && shard.index === plan.shards[0].index && i === 0 ? "failed" : "passed",
-  }))
+  const last = shards[shards.length - 1]
+  const tests = fixture.case === "drop" && shard.index === last.index ? shard.tests.slice(0, -1) : shard.tests
+  const files = new Map<string, Suite>()
+  const shots: string[] = []
+  tests.forEach((t, i) => {
+    const { file, titles } = where(t)
+    if (!files.has(file)) files.set(file, { title: file, file, specs: [], suites: [] })
+    let suite = files.get(file)!
+    for (const title of titles.slice(0, -1)) {
+      let child = suite.suites.find((s) => s.title === title)
+      if (!child) {
+        child = { title, file, specs: [], suites: [] }
+        suite.suites.push(child)
+      }
+      suite = child
+    }
+    const failed = fixture.case === "fail" && shard.index === shards[0].index && i === 0
+    const shot = `test-results/fixture-${index}-${i}/screenshot-1.png`
+    if (failed) shots.push(shot)
+    const result = failed
+      ? {
+          retry: 0,
+          status: "failed",
+          duration: 1_200,
+          errors: [],
+          error: { message: 'Error: expect(locator).toHaveText(expected) failed\n\nExpected string: "Approved"\nReceived string: "Pending"' },
+          steps: [{ title: "open the page" }, { title: "read status chip", error: { message: "failed" } }],
+          attachments: [{ name: "screenshot", contentType: "image/png", path: `/runner/work/repo/${shot}` }],
+        }
+      : { retry: 0, status: "passed", duration: 1_000, errors: [], steps: [{ title: "open the page" }], attachments: [] }
+    suite.specs.push({
+      title: titles[titles.length - 1],
+      file,
+      line: 1,
+      column: 1,
+      tests: [{ projectName: t.project, projectId: t.project, expectedStatus: "passed", status: failed ? "unexpected" : "expected", results: [result] }],
+    })
+  })
+  return { report: { config: { rootDir: `/runner/work/repo/${TEST_DIR}` }, suites: [...files.values()], stats: {} }, shots, ran: tests.length }
 }
 
 const env = (name: string) => {
@@ -49,26 +98,28 @@ const env = (name: string) => {
   return v
 }
 
-const readJson = <T>(path: string): T => JSON.parse(readFileSync(path, "utf8")) as T
-
 export async function main(argv: string[]) {
   const [cmd, planDir, outDir] = argv
-  const run = readJson<RunJson>(join(planDir, "run.json"))
-  const plan = readJson<PlanJson>(join(planDir, "plan.json"))
+  const fixtureFile = join(planDir, FIXTURE_FILE)
+  const fixture = existsSync(fixtureFile) ? readJsonFile<FixtureJson>(fixtureFile) : null
+  const run = readJsonFile<unknown>(join(planDir, FILES.setupPlan))
+  const plan = readJsonFile<unknown>(join(planDir, FILES.shardPlan))
+  const check = checkRunInputs({ setupRunId: env("SETUP_RUN_ID"), runKey: env("RUN_KEY"), sha: env("GITHUB_SHA"), run, plan, fixture })
+  if (!check.ok) throw new Error(check.reason)
   if (cmd === "inputs") {
-    const check = checkRunInputs({ setupRunId: env("SETUP_RUN_ID"), runKey: env("RUN_KEY"), sha: env("GITHUB_SHA"), run, plan })
-    if (!check.ok) throw new Error(check.reason)
     appendFileSync(env("GITHUB_OUTPUT"), `shards=${JSON.stringify(check.shards)}\nfan_in=${check.fanIn}\n`)
     return
   }
   if (cmd === "shard") {
     const index = Number(env("SHARD"))
-    const results = fixtureShardResults(run, plan, index)
+    const { report, shots, ran } = fixtureShardReport(run as SetupPlan, plan as ShardPlan, fixture as FixtureJson, index, env("RUN_KEY"))
     mkdirSync(outDir, { recursive: true })
-    writeFileSync(join(outDir, `shard-${index}.json`), JSON.stringify({ shard: index, results }, null, 2))
-    if (process.env.GITHUB_STEP_SUMMARY) {
-      appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Shard ${index}: ${results.map((r) => `${r.status} \`${r.id}\``).join(", ")}\n`)
+    writeFileSync(join(outDir, "report.json"), JSON.stringify(report, null, 2))
+    for (const shot of shots) {
+      mkdirSync(join(outDir, shot, ".."), { recursive: true })
+      writeFileSync(join(outDir, shot), FIXTURE_SCREENSHOT)
     }
+    if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Shard ${index}: ran ${ran} fixture test(s).\n`)
     return
   }
   throw new Error(`unknown command "${cmd}"`)

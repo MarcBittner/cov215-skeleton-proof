@@ -16,7 +16,7 @@ permissions: {}
 jobs:
   inputs:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions: {actions: read, contents: read}
     outputs:
       shards: ${{ steps.inputs.outputs.shards }}
@@ -24,8 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
+      - uses: ./.github/actions/e2e-dist
       - uses: actions/download-artifact@v4
         with:
           name: e2e-plan
@@ -33,7 +32,7 @@ jobs:
           run-id: ${{ inputs.setup_run_id }}
           github-token: ${{ github.token }}
       - id: inputs
-        run: node scripts/e2e/run/skeleton.ts inputs e2e-in/plan
+        run: node scripts/e2e/dist/scripts/e2e/run/skeleton.js inputs e2e-in/plan
         env:
           SETUP_RUN_ID: ${{ inputs.setup_run_id }}
           RUN_KEY: ${{ inputs.run_key }}
@@ -50,17 +49,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {persist-credentials: false}
-      - uses: actions/setup-node@v4
-        with: {node-version: 24}
+      - uses: ./.github/actions/e2e-dist
       - uses: actions/download-artifact@v4
         with:
           name: e2e-plan
           path: e2e-in/plan
           run-id: ${{ inputs.setup_run_id }}
           github-token: ${{ github.token }}
-      - run: node scripts/e2e/run/skeleton.ts shard e2e-in/plan e2e-out/shard
+      - run: node scripts/e2e/dist/scripts/e2e/run/skeleton.js shard e2e-in/plan e2e-out/shard
         env:
+          SETUP_RUN_ID: ${{ inputs.setup_run_id }}
+          RUN_KEY: ${{ inputs.run_key }}
           SHARD: ${{ matrix.shard }}
+      - run: node scripts/e2e/dist/scripts/e2e/report/scrub.mjs e2e-out/shard
       - uses: actions/upload-artifact@v4
         with:
           name: e2e-shard-${{ matrix.shard }}

@@ -1,0 +1,9 @@
+{
+  "name": "cov215-skeleton-proof",
+  "private": true,
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "20.19.33",
+    "jszip": "3.10.1"
+  }
+}

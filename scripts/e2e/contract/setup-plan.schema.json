@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://co-ver.com/schemas/e2e/setup-plan.schema.json",
+  "title": "run.json: the setup run's plan artifact",
+  "description": "Written by e2e-setup.yml (resolve, then prepare) into artifact e2e-plan. The only source report trusts for run identity (R88, R91).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "setup_run_id",
+    "run_tag",
+    "workflow_sha",
+    "created_at",
+    "kind",
+    "fixture",
+    "select_mode",
+    "pr",
+    "pr_sha",
+    "base_sha",
+    "branch",
+    "deployment",
+    "gate",
+    "mail",
+    "tenants",
+    "dispatches",
+    "supersedes",
+    "state",
+    "reason"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "setup_run_id": { "$ref": "#/$defs/runId" },
+    "run_tag": { "type": "string", "pattern": "^r[1-9][0-9]{0,19}$" },
+    "workflow_sha": { "$ref": "#/$defs/sha" },
+    "created_at": { "$ref": "#/$defs/datetime" },
+    "kind": { "enum": ["pr", "postmerge", "nightly", "gate", "mut", "fallback", "fresh", "base"] },
+    "fixture": { "type": "boolean" },
+    "select_mode": { "enum": ["full", "select"] },
+    "pr": { "type": ["integer", "null"], "minimum": 1 },
+    "pr_sha": { "$ref": "#/$defs/sha" },
+    "base_sha": { "anyOf": [{ "$ref": "#/$defs/sha" }, { "type": "null" }] },
+    "branch": { "$ref": "#/$defs/branch" },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["github_deployment_id", "vercel_deployment_id", "url", "convex_deployment", "convex_url"],
+      "properties": {
+        "github_deployment_id": { "type": "integer", "minimum": 1 },
+        "vercel_deployment_id": { "type": "string", "pattern": "^dpl_[A-Za-z0-9]{8,64}$" },
+        "url": { "type": "string", "pattern": "^https://[a-z0-9][a-z0-9.-]*[a-z0-9](/)?$", "maxLength": 253 },
+        "convex_deployment": { "type": "string", "pattern": "^[a-z]+-[a-z]+-[0-9]+$" },
+        "convex_url": { "type": "string", "pattern": "^https://[a-z]+-[a-z]+-[0-9]+\\.convex\\.cloud$" }
+      }
+    },
+    "gate": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ref", "path", "sha256"],
+          "properties": {
+            "ref": { "type": "string", "pattern": "^(e2e/gate/[A-Za-z0-9._-]{1,64}|artifact:[A-Za-z0-9._-]{1,64})$" },
+            "path": { "type": "string", "pattern": "^e2e/[^\\s:|\\\\]+\\.spec\\.ts$", "maxLength": 300 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      ]
+    },
+    "mail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contained", "effective_catch_all"],
+      "properties": {
+        "contained": { "type": "boolean" },
+        "effective_catch_all": { "type": ["string", "null"], "pattern": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", "maxLength": 254 }
+      }
+    },
+    "tenants": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["test_id", "org_id"],
+        "properties": {
+          "test_id": { "$ref": "#/$defs/testId" },
+          "org_id": { "$ref": "#/$defs/convexId" }
+        }
+      }
+    },
+    "dispatches": {
+      "type": "array",
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["run_key", "role", "bundle_artifact", "ref", "dispatched_run_id", "dispatched_at"],
+        "properties": {
+          "run_key": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+          "role": { "enum": ["main", "ai"] },
+          "bundle_artifact": { "enum": ["e2e-bundle", "e2e-bundle-ai"] },
+          "ref": { "$ref": "#/$defs/branch" },
+          "dispatched_run_id": { "anyOf": [{ "$ref": "#/$defs/runId" }, { "type": "null" }] },
+          "dispatched_at": { "anyOf": [{ "$ref": "#/$defs/datetime" }, { "type": "null" }] }
+        }
+      }
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["setup_run_id", "pr_sha"],
+        "properties": {
+          "setup_run_id": { "$ref": "#/$defs/runId" },
+          "pr_sha": { "$ref": "#/$defs/sha" }
+        }
+      }
+    },
+    "state": { "enum": ["planned", "dispatched", "refused", "failed", "superseded", "skipped"] },
+    "reason": { "type": ["string", "null"], "minLength": 1, "maxLength": 500 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "gate" } } },
+      "then": { "properties": { "gate": { "type": "object" } } },
+      "else": { "properties": { "gate": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "pr" } } },
+      "then": { "properties": { "pr": { "type": "integer" } } }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["planned", "dispatched"] } } },
+      "then": { "properties": { "reason": { "type": "null" } } },
+      "else": { "properties": { "reason": { "type": "string" } } }
+    }
+  ],
+  "$defs": {
+    "runId": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "datetime": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,3})?Z$" },
+    "branch": { "type": "string", "pattern": "^(?!/)(?!.*\\.\\.)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<!/)(?<!\\.lock)$" },
+    "convexId": { "type": "string", "pattern": "^[a-z0-9]{16,64}$" },
+    "testId": {
+      "type": "string",
+      "maxLength": 1000,
+      "pattern": "^(test:[^\\s:|\\\\/][^\\s:|\\\\]*::[^\\r\\n\\t]+|gen:screen:cell:[^\\r\\n\\t]+|gen:snapshot:control:cell:[^\\r\\n\\t]+)$"
+    }
+  }
+}

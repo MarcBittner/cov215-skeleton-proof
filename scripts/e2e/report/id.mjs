@@ -1,0 +1,108 @@
+import { packByRuntime, binLoads, percentile } from "../../shard-balance.mjs"
+import { isIdOfKind, testKindOf } from "../../../e2e/map/ids.js"
+
+export const SEP = " › "
+export const TEST_DIR = "e2e"
+export const DEFAULT_TEST_MS = 30_000
+
+export function listLine({ project, file, titles }) {
+  for (const part of [file, ...titles]) {
+    if (part.includes("›")) throw new Error(`test title contains "›", which a Playwright test list cannot express: ${[file, ...titles].join(SEP)}`)
+  }
+  return `[${project}]${SEP}${file}${SEP}${titles.join(SEP)}`
+}
+
+export function parseListLine(line) {
+  const m = /^\[([^\]]+)\] › (.+)$/.exec(line)
+  if (!m) throw new Error(`not a test-list line: ${line}`)
+  const [file, ...titles] = m[2].split(SEP)
+  if (!file || titles.length === 0) throw new Error(`not a test-list line: ${line}`)
+  return { project: m[1], file, titles }
+}
+
+export function isContractTestId(id) {
+  return typeof id === "string" && isIdOfKind(id, "test", "gen-screen", "gen-snapshot")
+}
+
+export function contractId({ file, titles }, testDir = TEST_DIR) {
+  const last = titles[titles.length - 1]
+  if (titles.length && isIdOfKind(last, "gen-screen", "gen-snapshot")) return last
+  const id = `test:${testDir}/${file}::${titles.join(SEP)}`
+  if (!isIdOfKind(id, "test")) throw new Error(`test has no contract id (empty, padded or multi-line title): ${[file, ...titles].join(SEP)}`)
+  return id
+}
+
+export function contractIdFromLine(line, testDir = TEST_DIR) {
+  return contractId(parseListLine(line), testDir)
+}
+
+export function lineFromContractId(id, project, testDir = TEST_DIR) {
+  if (!isIdOfKind(id, "test")) throw new Error(`only a test: id converts to a test-list line without the catalogue: ${id}`)
+  const sep = id.indexOf("::")
+  const repoPath = id.slice("test:".length, sep)
+  const prefix = `${testDir}/`
+  if (!repoPath.startsWith(prefix)) throw new Error(`${id} is not under ${testDir}/`)
+  return listLine({ project, file: repoPath.slice(prefix.length), titles: id.slice(sep + 2).split(SEP) })
+}
+
+export function* walkReport(report, testDir = TEST_DIR) {
+  function* walk(suite, titles) {
+    for (const spec of suite.specs ?? []) {
+      for (const test of spec.tests ?? []) {
+        const t = [...titles, spec.title]
+        const where = { project: test.projectName, file: spec.file, titles: t }
+        yield { id: contractId(where, testDir), listLine: listLine(where), project: test.projectName, file: `${testDir}/${spec.file}`, titles: t, line: spec.line, test }
+      }
+    }
+    for (const child of suite.suites ?? []) yield* walk(child, [...titles, child.title])
+  }
+  if (!report || !Array.isArray(report.suites)) throw new Error("not a Playwright JSON report: no suites[]")
+  for (const fileSuite of report.suites) yield* walk(fileSuite, [])
+}
+
+export function catalogueFromList(listReport, testDir = TEST_DIR) {
+  const seen = new Map()
+  const out = []
+  for (const { id, listLine: line, project, file, titles } of walkReport(listReport, testDir)) {
+    if (seen.has(id)) throw new Error(`test id ${id} is listed twice (${seen.get(id)} and ${line}); a test runs in one project`)
+    seen.set(id, line)
+    out.push({ id, listLine: line, project, file, titles, kind: testKindOf(id) })
+  }
+  return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+export function weigher(durations, ids, projectOf) {
+  const byProject = new Map()
+  const all = []
+  for (const [id, ms] of Object.entries(durations ?? {})) {
+    if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 0) continue
+    const project = projectOf(id)
+    if (project) {
+      if (!byProject.has(project)) byProject.set(project, [])
+      byProject.get(project).push(ms)
+    }
+    all.push(ms)
+  }
+  const globalP75 = percentile(all, 0.75) || DEFAULT_TEST_MS
+  const unknown = []
+  const weights = new Map()
+  for (const id of ids) {
+    const known = durations?.[id]
+    if (typeof known === "number" && Number.isFinite(known) && known >= 0) {
+      weights.set(id, known)
+      continue
+    }
+    unknown.push(id)
+    const samples = byProject.get(projectOf(id))
+    weights.set(id, samples && samples.length ? percentile(samples, 0.75) : globalP75)
+  }
+  return { weights, unknown }
+}
+
+export function packTestIds(ids, weights, count) {
+  const bins = packByRuntime(
+    ids.map((id) => ({ id, weight: weights.get(id) ?? 0 })),
+    count,
+  )
+  return { bins, loads: binLoads(bins, (id) => weights.get(id) ?? 0) }
+}

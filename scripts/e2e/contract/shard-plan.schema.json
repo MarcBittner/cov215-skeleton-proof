@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://co-ver.com/schemas/e2e/shard-plan.schema.json",
+  "title": "plan.json: the planned test ids per shard",
+  "description": "Written by setup (plan-shards.mjs, staging's copy) into artifact e2e-plan beside run.json. Report counts results against this file only (A11, R78d). A bundle carries the shards of its own run_key.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "setup_run_id", "select_mode", "full_run", "shards"],
+  "properties": {
+    "schema_version": { "type": "string", "pattern": "^1\\.(0|[1-9][0-9]*)$" },
+    "setup_run_id": { "type": "string", "pattern": "^[1-9][0-9]{0,19}$" },
+    "select_mode": { "enum": ["full", "select"] },
+    "full_run": { "type": ["string", "null"], "minLength": 1, "maxLength": 500 },
+    "shards": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "$ref": "#/$defs/shard" } }
+  },
+  "$defs": {
+    "shard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run_key", "index", "predicted_ms", "tests"],
+      "properties": {
+        "run_key": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+        "index": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "predicted_ms": { "type": "integer", "minimum": 0 },
+        "tests": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/plannedTest" } }
+      }
+    },
+    "plannedTest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "file", "project", "predicted_ms"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 1000,
+          "pattern": "^(test:[^\\s:|\\\\/][^\\s:|\\\\]*::[^\\r\\n\\t]+|gen:screen:cell:[^\\r\\n\\t]+|gen:snapshot:control:cell:[^\\r\\n\\t]+)$"
+        },
+        "kind": { "enum": ["functional", "screen", "snapshot"] },
+        "file": { "type": "string", "pattern": "^e2e/[^\\s:|\\\\]+\\.spec\\.ts$", "maxLength": 300 },
+        "project": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,40}$" },
+        "predicted_ms": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

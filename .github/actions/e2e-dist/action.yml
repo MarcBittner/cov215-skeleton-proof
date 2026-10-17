@@ -1,0 +1,20 @@
+name: e2e-dist
+description: Install node_modules (cached on the lockfile) and compile scripts/e2e to scripts/e2e/dist; workflows run the compiled JavaScript.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - id: modules
+      uses: actions/cache@v4
+      with:
+        path: node_modules
+        key: node-modules-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+    - if: steps.modules.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm ci --prefer-offline --no-audit --no-fund
+    - shell: bash
+      run: |
+        npx tsc -p scripts/e2e/tsconfig.dist.json
+        echo '{"type":"module"}' > scripts/e2e/dist/package.json
