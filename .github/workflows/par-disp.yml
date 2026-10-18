@@ -1,0 +1,21 @@
+name: par-disp
+run-name: par-disp ${{ inputs.tag }} @ ${{ github.ref_name }}
+on:
+  workflow_dispatch:
+    inputs:
+      tag: {type: string, default: none}
+permissions: {}
+jobs:
+  with-env:
+    runs-on: ubuntu-latest
+    environment: parenv
+    steps:
+      - env:
+          SLEN: ${{ secrets.PAR_DUMMY }}
+        run: echo "job=with-env ref=${{ github.ref }} tag=${{ inputs.tag }} env_secret_len=${#SLEN}"
+  no-env:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SLEN: ${{ secrets.PAR_DUMMY }}
+        run: echo "job=no-env ref=${{ github.ref }} env_secret_len=${#SLEN}"

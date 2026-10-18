@@ -1,0 +1,31 @@
+name: par-pt
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [par-base]
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    environment: parenv
+    permissions: {actions: write, contents: read}
+    steps:
+      - name: context
+        env:
+          SLEN: ${{ secrets.PAR_DUMMY }}
+        run: |
+          echo "COPY_MARKER=BASE-COPY"
+          echo "event=${{ github.event_name }} ref=${{ github.ref }} ref_name=${{ github.ref_name }} sha=${{ github.sha }}"
+          echo "head_ref=${{ github.head_ref }} base_ref=${{ github.base_ref }} pr_head_sha=${{ github.event.pull_request.head.sha }} workflow_ref=${{ github.workflow_ref }} workflow_sha=${{ github.workflow_sha }}"
+          echo "env_secret_len=${#SLEN}"
+      - name: dispatch disp-tok at par-base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for v in 2026-03-10 none; do
+            H=(); [ "$v" != none ] && H=(-H "X-GitHub-Api-Version: $v")
+            code=$(curl -sS -o out.json -w '%{http_code}' -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "${H[@]}" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/par-disp-tok.yml/dispatches" \
+              -d "{\"ref\":\"par-base\",\"inputs\":{\"tag\":\"pt-${{ github.run_id }}-$v\"}}")
+            echo "DISPATCH api_version=$v status=$code body=$(cat out.json)"
+          done
