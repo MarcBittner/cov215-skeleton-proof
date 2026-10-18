@@ -1,6 +1,9 @@
 name: par-disp
-run-name: par-disp ${{ inputs.tag }} @ ${{ github.ref_name }}
+run-name: par-disp ${{ inputs.tag || github.event_name }} @ ${{ github.ref_name }}
 on:
+  push:
+    branches: [par-base]
+    paths: ['.github/workflows/par-disp.yml']
   workflow_dispatch:
     inputs:
       tag: {type: string, default: none}
@@ -9,10 +12,25 @@ jobs:
   with-env:
     runs-on: ubuntu-latest
     environment: parenv
+    permissions: {actions: write, contents: read}
     steps:
       - env:
           SLEN: ${{ secrets.PAR_DUMMY }}
-        run: echo "job=with-env ref=${{ github.ref }} tag=${{ inputs.tag }} env_secret_len=${#SLEN}"
+        run: echo "job=with-env event=${{ github.event_name }} ref=${{ github.ref }} tag=${{ inputs.tag }} env_secret_len=${#SLEN}"
+      - name: GITHUB_TOKEN dispatches at par-base
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for w in par-disp-tok.yml 388067330 par-never.yml; do
+            for v in 2026-03-10 none; do
+              H=(); [ "$v" != none ] && H=(-H "X-GitHub-Api-Version: $v")
+              code=$(curl -sS -o out.json -w '%{http_code}' -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "${H[@]}" \
+                "https://api.github.com/repos/${{ github.repository }}/actions/workflows/$w/dispatches" \
+                -d "{\"ref\":\"par-base\",\"inputs\":{\"tag\":\"tok-${{ github.run_id }}-$w-$v\"}}")
+              echo "DISPATCH wf=$w api_version=$v status=$code body=$(tr -d '\n' < out.json)"
+            done
+          done
   no-env:
     runs-on: ubuntu-latest
     steps:
