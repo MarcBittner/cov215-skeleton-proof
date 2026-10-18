@@ -14,7 +14,7 @@ jobs:
         env:
           SLEN: ${{ secrets.PAR_DUMMY }}
         run: |
-          echo "COPY_MARKER=BASE-COPY"
+          echo "COPY_MARKER=HEAD-COPY"
           echo "event=${{ github.event_name }} ref=${{ github.ref }} ref_name=${{ github.ref_name }} sha=${{ github.sha }}"
           echo "head_ref=${{ github.head_ref }} base_ref=${{ github.base_ref }} pr_head_sha=${{ github.event.pull_request.head.sha }} workflow_ref=${{ github.workflow_ref }} workflow_sha=${{ github.workflow_sha }}"
           echo "env_secret_len=${#SLEN}"
