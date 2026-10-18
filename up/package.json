@@ -1,0 +1,1 @@
+{ "name": "up", "private": true, "type": "module", "dependencies": { "jszip": "3.10.1" }, "devDependencies": { "typescript": "5.6.3", "@types/node": "22.7.5" } }

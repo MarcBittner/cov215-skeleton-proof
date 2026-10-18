@@ -1,0 +1,5 @@
+name: e2e-up
+description: Uploads e2e-bundle-1..3 mid-step via upload.ts
+runs:
+  using: node24
+  main: main.mjs

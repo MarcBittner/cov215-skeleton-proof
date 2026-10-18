@@ -1,0 +1,61 @@
+name: artifact-proof
+on:
+  push:
+    branches: [proof/artifact-upload]
+  workflow_dispatch:
+permissions:
+  actions: read
+  contents: read
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          echo "485218d5d6c12daf0a43c53c7bdf58efecb1a64aa86b42b6679a47de7c404877  up/src/upload.ts" | sha256sum -c
+          cd up && npm install --no-audit --no-fund && npx tsc -p . && ls dist
+      - uses: ./.github/actions/e2e-up
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: poll artifacts API, download zip, compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          RUN: ${{ github.run_id }}
+          ATT: ${{ github.run_attempt }}
+        run: |
+          set -u
+          api() { curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/$1"; }
+          fail=0
+          for i in 1 2 3; do
+            n=e2e-bundle-$i
+            for t in $(seq 1 120); do
+              a=$(api "repos/$R/actions/runs/$RUN/artifacts?name=$n" | jq -c '.artifacts[0] // empty')
+              [ -n "$a" ] && break; sleep 3
+            done
+            if [ -z "$a" ]; then echo "FAIL $n never appeared"; fail=1; continue; fi
+            st=$(api "repos/$R/actions/runs/$RUN/jobs" | jq -r '.jobs[]|select(.name=="upload")|.steps[]|select(.name|test("e2e-up"))|.status')
+            echo "$(date -u +%FT%TZ) $n listed: $a"
+            echo "  upload job e2e-up step status at sighting: $st"
+            created=$(jq -r .created_at <<<"$a"); exp=$(jq -r .expires_at <<<"$a")
+            echo "  retention hours: $(( ($(date -d "$exp" +%s) - $(date -d "$created" +%s)) / 3600 ))"
+            curl -sSL -o $n.zip -H "Authorization: Bearer $GH_TOKEN" "$(jq -r .archive_download_url <<<"$a")"
+            echo "  zip sha256 $(sha256sum $n.zip | cut -c1-64) vs digest $(jq -r .digest <<<"$a") size $(stat -c%s $n.zip) vs $(jq -r .size_in_bytes <<<"$a")"
+            mkdir -p rest/$n && unzip -oq $n.zip -d rest/$n
+            exp_sha=$(python3 -c "import sys;i=int(sys.argv[1]);s=f'bundle {i} run $RUN attempt $ATT\n'*(1000*i);import hashlib;print(hashlib.sha256(s.encode()).hexdigest())" $i)
+            got=$(sha256sum rest/$n/bundle.txt | cut -c1-64)
+            if [ "$exp_sha" = "$got" ]; then echo "  OK bytes match $got"; else echo "  FAIL bytes $got != $exp_sha"; fail=1; fi
+            [ "$st" = "in_progress" ] || { echo "  NOTE: not seen mid-step"; }
+          done
+          exit $fail
+      - uses: actions/download-artifact@v4
+        with: { name: e2e-bundle-1, path: dl/e2e-bundle-1, run-id: "${{ github.run_id }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: e2e-bundle-2, path: dl/e2e-bundle-2, run-id: "${{ github.run_id }}", github-token: "${{ github.token }}" }
+      - uses: actions/download-artifact@v4
+        with: { name: e2e-bundle-3, path: dl/e2e-bundle-3, run-id: "${{ github.run_id }}", github-token: "${{ github.token }}" }
+      - name: compare download-artifact output
+        run: |
+          for i in 1 2 3; do cmp dl/e2e-bundle-$i/bundle.txt rest/e2e-bundle-$i/bundle.txt && cmp dl/e2e-bundle-$i/nested/meta.json rest/e2e-bundle-$i/nested/meta.json && echo "e2e-bundle-$i download-artifact identical"; done
+          find dl -type f | sort
