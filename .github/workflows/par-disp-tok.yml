@@ -1,6 +1,9 @@
 name: par-disp-tok
 run-name: par-disp-tok ${{ inputs.tag }}
 on:
+  push:
+    branches: [par-base]
+    paths: ['.github/workflows/par-disp-tok.yml']
   workflow_dispatch:
     inputs:
       tag: {type: string, default: none}
